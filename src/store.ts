@@ -22,7 +22,7 @@ import type {
   StoredImage,
   StoredImageThumbnail,
 } from './types'
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS } from './types'
+import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS, MAX_INPUT_IMAGES } from './types'
 import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, resolveApiProfileModel, splitModelList, validateApiProfile } from './lib/apiProfiles'
 import { enforcePresetConfigPolicy, getPresetConfig, getPresetProfileIds, getPresetProviderIds, isPresetConfigDeletionPrevented, isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile, isPresetProviderDeletionPrevented } from './lib/presetConfig'
 import { dismissAllTooltips } from './lib/tooltipDismiss'
@@ -52,7 +52,7 @@ import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSin
 import { buildAgentApiInput, buildAgentContinuationInput } from './lib/agentInputBuilder'
 import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId } from './lib/agentImageReferences'
 import { showBrowserNotification } from './lib/browserNotification'
-import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
+import { IMAGE_FETCH_CORS_HINT, isHttpUrl } from './lib/imageApiShared'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
@@ -67,7 +67,7 @@ import { hasActiveDataOperations, isCustomRecoverableTask, isFalRecoverableTask 
 import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, createExportBlob, getExportZipPlan, MAX_EXPORT_ZIP_BYTES, readExportZip, readExportZipFileAsDataUrl, readExportZipManifest } from './lib/exportZip'
 import { getExportImageSizes, readExportImages } from './lib/exportImages'
-import { deleteAgentRoundFromConversation, getActiveAgentRounds, getAgentRoundPath, normalizeAgentConversations, remapAgentRoundMentionsForPathChange, uniqueIds } from './lib/agentConversationState'
+import { deleteAgentRoundFromConversation, getActiveAgentRounds, getAgentRoundPath, isEmptyAgentConversation, normalizeAgentConversations, remapAgentRoundMentionsForPathChange, uniqueIds } from './lib/agentConversationState'
 import { canonicalizeBatchFunctionCallArguments, countResponseToolCalls, createReadyAgentRecoveredToolState, getAgentFunctionOutputCallIds, getAgentRecoveredFailureError, getAgentRecoveredToolCallCount, getPersistableAgentConversations, getPersistableRawResponsePayload, mergeResponseOutputItems, scrubResponseOutputForDeletedAgentTasks, scrubTaskRawResponsePayloadForDeletedTasks } from './lib/agentResponseState'
 import { cleanStaleAgentInputDrafts, clearInputDraftState, isEmptyAgentInputDraft, normalizeAgentInputDrafts, remapAgentInputDraftMentionsForPathChange, restoreAgentInputDraftState, restoreGalleryInputDraftState, saveActiveAgentInputDrafts, saveGalleryInputDraft, syncActiveInputDraft, updateInputDraftImages } from './lib/inputDraftState'
 import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, createDefaultFavoriteCollection, deleteFavoriteCollectionState, ensureDefaultFavoriteCollection, getTaskFavoriteCollectionIds, mergeFavoriteCollections, normalizeFavoriteCollectionIds, normalizeFavoriteCollectionName, normalizeFavoriteCollections, normalizeFavoritePatch, normalizeLoadedFavoriteState, resolveDefaultFavoriteCollectionId, sameFavoriteCollectionIds } from './lib/favoriteState'
@@ -76,10 +76,11 @@ import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAge
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
 import { apiFetch, FetchConnectError, isTauri } from './lib/platform'
 import { pickSaveDir, saveFile, saveFileToDir, type SaveOptions } from './lib/saveFile'
-import { endDataProgress, setDataProgressCancelable, startDataProgress, updateDataProgress } from './lib/dataProgress'
+import { endDataProgress, setDataProgressCancelable, startDataProgress, updateDataProgress, useSettingsDataTransfer } from './lib/dataProgress'
 import { throwIfAborted } from './lib/serverSentEvents'
 import { tauriStorage } from './lib/tauriStorage'
 import { hasLocalImageBridge, LocalImageSaveError, localImageRecord, saveLocalGeneratedImages } from './lib/localRuntime'
+import { createPrivacyModeState, getPrivacySnapshotImageIds, isPrivacyHiddenConversation, isPrivacyHiddenTask, restorePrivacyInputState, type PrivacyModeState } from './lib/privacyMode'
 
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
@@ -123,7 +124,7 @@ function isErrorToastTitle(title: string): boolean {
   return /(?:失败|错误|异常|报错|无法|不能|超时|中断|断开|请先|请输入|已达上限|不存在|已丢失)$/.test(title)
 }
 
-export type SettingsTab = 'general' | 'agent' | 'api' | 'data' | 'about'
+export type SettingsTab = 'general' | 'appearance' | 'agent' | 'api' | 'data' | 'about'
 
 const TIMEOUT_STREAMING_HINT = '也可尝试打开「流式传输」，并提高「请求中间步骤图像数」来维持连接。'
 const TIMEOUT_PARTIAL_IMAGES_ZERO_HINT = '官方流式接口不发送心跳，当前「请求中间步骤图像数」为 0，连接可能因无数据传输而断开。建议提高到 2 或 3。'
@@ -164,9 +165,18 @@ function showTaskCompletionNotification(title: string, body: string, tag = 'task
   showBrowserNotification(title, { body, tag })
 }
 
+// 隐私模式中丢弃进入前已开始的任务和对话的提示与通知，退出后也不补发
+function isTaskHiddenByPrivacyMode(task: TaskRecord) {
+  return isPrivacyHiddenTask(useStore.getState().privacyMode, task)
+}
+
+function isConversationHiddenByPrivacyMode(conversationId: string) {
+  return Boolean(useStore.getState().privacyMode?.hiddenConversationIds.has(conversationId))
+}
+
 function showTaskFailureNotification(task: TaskRecord) {
   // Agent 任务由所在回合统一通知，批量任务在整批结束时汇总失败数量
-  if (isAgentTask(task) || batchTaskIds.has(task.id)) return
+  if (isAgentTask(task) || batchTaskIds.has(task.id) || isTaskHiddenByPrivacyMode(task)) return
   showTaskCompletionNotification('图像生成失败', '请回到应用查看详情。', 'task-failure')
 }
 
@@ -250,10 +260,6 @@ function createAgentConversationTitle(prompt: string, fallbackTitle: string) {
   return `${chars.slice(0, AGENT_CONVERSATION_TITLE_MAX_LENGTH - 3).join('')}...`
 }
 
-function isEmptyAgentConversation(conversation: AgentConversation) {
-  return conversation.rounds.length === 0 && conversation.messages.length === 0 && !conversation.activeRoundId
-}
-
 function getLatestAgentConversation(conversations: AgentConversation[]) {
   return conversations.reduce<AgentConversation | null>((latest, conversation) => {
     if (!latest) return conversation
@@ -263,7 +269,9 @@ function getLatestAgentConversation(conversations: AgentConversation[]) {
 }
 
 export function getPersistedState(state: AppState) {
-  return createPersistedState(state, agentConversationMigrationPending && !agentConversationPersistenceReady)
+  // 隐私模式中输入框已清空，仍保存进入前的输入，刷新后不丢失
+  const source = state.privacyMode ? { ...state, ...state.privacyMode.inputSnapshot } : state
+  return createPersistedState(source, agentConversationMigrationPending && !agentConversationPersistenceReady)
 }
 
 async function replaceStoredAgentConversations(conversations: AgentConversation[]) {
@@ -320,7 +328,7 @@ interface AppState {
   promptSelection: { start: number; end: number; prompt: string } | null
   setPromptSelection: (selection: { start: number; end: number }) => void
   inputImages: InputImage[]
-  addInputImage: (img: InputImage) => void
+  addInputImage: (img: InputImage, maxImages?: number) => void
   replaceInputImage: (idx: number, img: InputImage) => void
   removeInputImage: (idx: number) => void
   clearInputImages: () => void
@@ -427,6 +435,8 @@ interface AppState {
   supportPromptOpen: boolean
   supportPromptDismissed: boolean
   supportPromptSkippedForImportedData: boolean
+  /** 通过链接添加的参考图 id 到原链接，供只接受链接参考图的自定义服务商使用 */
+  imageSourceUrls: Record<string, string>
   setSupportPromptOpen: (v: boolean) => void
   dismissSupportPrompt: () => void
 
@@ -465,12 +475,21 @@ interface AppState {
     cancelAction?: (checkboxChecked?: boolean) => void
   } | null
   setConfirmDialog: (d: AppState['confirmDialog']) => void
+
+  // 隐私模式：不持久化，刷新页面后自然退出
+  privacyMode: PrivacyModeState | null
+  /** 每次进入隐私模式时递增，作为弹窗组件的 key，丢弃组件内部打开的弹窗和未保存内容 */
+  privacyModeEpoch: number
+  /** 设置弹窗的 key；导入导出中进入隐私模式时不变，保留进行中的传输状态 */
+  settingsModalEpoch: number
+  togglePrivacyMode: () => void
 }
 
 function isImageReferencedByState(state: AppState, imageId: string) {
   if (state.inputImages.some((img) => img.id === imageId)) return true
   if (state.galleryInputDraft?.inputImages.some((img) => img.id === imageId)) return true
   if (Object.values(state.agentInputDrafts).some((draft) => draft.inputImages.some((img) => img.id === imageId))) return true
+  if (getPrivacySnapshotImageIds(state.privacyMode).includes(imageId)) return true
   if (state.tasks.some((task) =>
     task.inputImageIds.includes(imageId) ||
     task.outputImages.includes(imageId) ||
@@ -502,6 +521,15 @@ export async function deleteImageIfUnreferenced(imageId: string) {
   }
 }
 
+function forgetImageSourceUrl(imageId: string) {
+  if (!(imageId in useStore.getState().imageSourceUrls)) return
+  useStore.setState((s) => {
+    const imageSourceUrls = { ...s.imageSourceUrls }
+    delete imageSourceUrls[imageId]
+    return { imageSourceUrls }
+  })
+}
+
 async function deleteStoredImageIfUnreferenced(imageId: string) {
   if (isImageReferencedByState(useStore.getState(), imageId)) return
   const [image, thumbnail] = await Promise.all([getImage(imageId), getStoredImageThumbnail(imageId)])
@@ -510,6 +538,7 @@ async function deleteStoredImageIfUnreferenced(imageId: string) {
   await deleteImage(imageId)
   if (!isImageReferencedByState(useStore.getState(), imageId)) {
     deleteImageCacheEntry(imageId)
+    forgetImageSourceUrl(imageId)
     return
   }
 
@@ -574,7 +603,7 @@ export const useStore = create<AppState>()(
         if (settings.agentApiConfigMode === 'off' && activeProfile.provider === 'openai' && activeProfile.apiMode !== 'responses') {
           state.setConfirmDialog({
             title: '需要 Responses API 配置',
-            message: `当前配置「${activeProfile.name}」使用的是 Images API，仅支持生成图片，无 Agent 模式需要的对话能力。\n\n请前往 API 配置页，将当前配置调整为 Responses API，或切换/新建一个支持 Responses API 的配置。`,
+            message: `当前配置「${activeProfile.name}」使用的是 Images API，仅支持生成图片，无 Agent 模式需要的对话能力。\n\n请在 **设置 → API 配置** 中将当前配置调整为 Responses API，或切换/新建一个支持 Responses API 的配置。`,
             confirmText: '去设置',
             cancelText: '取消',
             action: () => {
@@ -587,7 +616,7 @@ export const useStore = create<AppState>()(
         if (settings.agentApiConfigMode !== 'off') {
           state.setConfirmDialog({
             title: 'Agent API 配置不完整',
-            message: `${agentValidationError.message}\n\n请前往 Agent 配置页，选择或新建可用配置。`,
+            message: `${agentValidationError.message}\n\n请在 **设置 → Agent 配置** 中选择或新建可用配置。`,
             confirmText: '去设置',
             cancelText: '取消',
             action: () => {
@@ -599,7 +628,7 @@ export const useStore = create<AppState>()(
 
         state.setConfirmDialog({
           title: '配置不支持 Agent 模式',
-          message: `当前配置「${activeProfile.name}」所属的服务商暂不支持 Agent 模式。Agent 模式需要使用支持 Responses API 的 OpenAI 配置。\n\n请前往 API 配置页，切换或新建一个支持 Responses API 的配置。`,
+          message: `当前配置「${activeProfile.name}」所属的服务商暂不支持 Agent 模式。Agent 模式需要使用支持 Responses API 的 OpenAI 配置。\n\n请在 **设置 → API 配置** 中切换或新建一个支持 Responses API 的配置。`,
           confirmText: '去设置',
           cancelText: '取消',
           action: () => {
@@ -724,9 +753,12 @@ export const useStore = create<AppState>()(
       promptSelection: null,
       setPromptSelection: (selection) => set((s) => ({ promptSelection: { ...selection, prompt: s.prompt } })),
       inputImages: [],
-      addInputImage: (img) =>
+      addInputImage: (img, maxImages) =>
         set((s) => {
           if (s.inputImages.find((i) => i.id === img.id)) return s
+          if (maxImages !== undefined && s.inputImages.length >= maxImages) {
+            throw new Error(maxImages === 0 ? '当前图片接口只支持文生图' : `参考图数量已达上限（${maxImages} 张），无法继续添加`)
+          }
           return syncActiveInputDraft(s, { inputImages: [...s.inputImages, img] })
         }),
       replaceInputImage: (idx, img) => {
@@ -1048,6 +1080,7 @@ export const useStore = create<AppState>()(
       supportPromptOpen: false,
       supportPromptDismissed: false,
       supportPromptSkippedForImportedData: false,
+      imageSourceUrls: {},
       setSupportPromptOpen: (supportPromptOpen) => set({ supportPromptOpen }),
       dismissSupportPrompt: () => set({ supportPromptOpen: false, supportPromptDismissed: true }),
 
@@ -1067,6 +1100,67 @@ export const useStore = create<AppState>()(
       setConfirmDialog: (confirmDialog) => {
         if (confirmDialog) dismissAllTooltips()
         set({ confirmDialog })
+      },
+
+      privacyMode: null,
+      privacyModeEpoch: 0,
+      settingsModalEpoch: 0,
+      togglePrivacyMode: () => {
+        const state = get()
+        if (state.privacyMode) {
+          set({
+            privacyMode: null,
+            ...restorePrivacyInputState(state.privacyMode.inputSnapshot, state),
+          })
+          const stopped = state.privacyMode.stoppedBatchPrompts
+          if (stopped > 0) get().showToast(`进入隐私模式时停止了批量提交，${stopped} 条提示词未提交`, 'info')
+          return
+        }
+
+        const privacyMode = createPrivacyModeState(state, Date.now())
+        // 继续批量会用旧提示词创建新的可见任务；已开始的任务继续执行
+        if (state.batchProgress) endBatch(activeBatchId)
+        dismissAllTooltips()
+        // 导入导出进行中保留设置弹窗和其中的确认框，传输期间的限制与提示照旧，其余照常进入隐私模式
+        const keepSettings = Boolean(useSettingsDataTransfer.getState().mode)
+        const activeConversation = state.agentConversations.find((c) => c.id === state.activeAgentConversationId)
+        set({
+          privacyMode,
+          privacyModeEpoch: state.privacyModeEpoch + 1,
+          appMode: 'gallery',
+          ...clearInputDraftState(),
+          galleryInputDraft: null,
+          agentInputDrafts: {},
+          activeAgentConversationId: activeConversation && !isPrivacyHiddenConversation(privacyMode, activeConversation) ? activeConversation.id : null,
+          reusedTaskApiProfileId: null,
+          reusedTaskApiProfileName: null,
+          reusedTaskApiProfileMissing: false,
+          reusedTaskApiModel: null,
+          agentMobileHeaderVisible: true,
+          agentEditingRoundId: null,
+          agentEditingConversationId: null,
+          searchQuery: '',
+          filterStatus: 'all',
+          filterFavorite: false,
+          activeFavoriteCollectionId: null,
+          selectedTaskIds: [],
+          selectedFavoriteCollectionIds: [],
+          // 直接关闭，不经过各弹窗的关闭流程，不保存草稿也不弹出确认
+          ...(keepSettings ? {} : {
+            showSettings: false,
+            settingsTabRequest: null,
+            confirmDialog: null,
+            settingsModalEpoch: state.settingsModalEpoch + 1,
+          }),
+          detailTaskId: null,
+          lightboxImageId: null,
+          lightboxImageList: [],
+          lightboxCommentPrompt: null,
+          sketchBoard: null,
+          favoritePickerTaskIds: null,
+          isManageCollectionsModalOpen: false,
+          toast: null,
+        })
       },
     }),
     {
@@ -1174,7 +1268,7 @@ function scheduleOpenAIWatchdog(taskId: string, timeoutSeconds: number, profile?
   const timer = setTimeout(() => {
     openAIWatchdogTimers.delete(taskId)
     const failed = failOpenAITaskIfStillRunning(taskId, createOpenAITimeoutError(timeoutSeconds, profile))
-    if (failed) useStore.getState().showToast('OpenAI 任务请求超时', 'error')
+    if (failed && !isTaskHiddenByPrivacyMode(task)) useStore.getState().showToast('OpenAI 任务请求超时', 'error')
   }, remainingMs)
   openAIWatchdogTimers.set(taskId, timer)
 }
@@ -1277,7 +1371,7 @@ function getAgentProfileValidationError(settings: AppSettings): { profile: ApiPr
 
   if (normalized.agentApiConfigMode === 'hybrid') {
     const imageProfile = getAgentImageApiProfile(normalized)
-    if (!imageProfile) return { profile: null, message: '图像模型 API 配置不存在，请在 Agent 配置页选择可用的图像模型配置。' }
+    if (!imageProfile) return { profile: null, message: '图像模型 API 配置不存在，请在 设置 → Agent 配置 中选择可用的图像模型配置。' }
     const imageProfileError = validateApiProfile(imageProfile)
     if (imageProfileError) return { profile: imageProfile, message: `图像模型 API 配置不完整：${imageProfileError}` }
   }
@@ -1472,9 +1566,11 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     ...createTaskDonePatch(task, Date.now()),
     falRecoverable: false,
   })
-  useStore.getState().showToast(localSaveError || `fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, localSaveError ? 'error' : 'success')
-  if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `fal.ai 任务已恢复，共 ${outputIds.length} 张图片。`)
-  else void continueRecoveredAgentRound(task.id)
+  if (!isTaskHiddenByPrivacyMode(task)) {
+    useStore.getState().showToast(localSaveError || `fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, localSaveError ? 'error' : 'success')
+    if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `fal.ai 任务已恢复，共 ${outputIds.length} 张图片。`)
+  }
+  if (isAgentTask(task)) void continueRecoveredAgentRound(task.id)
 }
 
 async function recoverFalTask(taskId: string) {
@@ -1604,6 +1700,10 @@ export async function initStore() {
     } else {
       await deleteImage(imgId)
     }
+  }
+  const imageSourceUrls = useStore.getState().imageSourceUrls
+  if (Object.keys(imageSourceUrls).some((id) => !referencedIds.has(id))) {
+    useStore.setState({ imageSourceUrls: Object.fromEntries(Object.entries(imageSourceUrls).filter(([id]) => referencedIds.has(id))) })
   }
   void scheduleMissingThumbnailBackfill(referencedImageIds)
   // 网页版旧数据的原图和缩略图以 dataUrl 字符串保存，首屏加载后在后台逐条转成 Blob
@@ -2253,8 +2353,8 @@ async function deleteUnreferencedImageIds(imageIds: Iterable<string>) {
   const candidates = Array.from(new Set(Array.from(imageIds).filter(Boolean)))
   if (candidates.length === 0) return
 
-  const { tasks, inputImages, galleryInputDraft } = useStore.getState()
-  const stillUsed = new Set<string>()
+  const { tasks, inputImages, galleryInputDraft, privacyMode } = useStore.getState()
+  const stillUsed = new Set<string>(getPrivacySnapshotImageIds(privacyMode))
   for (const task of tasks) addTaskReferencedImageIds(stillUsed, task)
   addAgentReferencedImageIds(stillUsed)
   addInputDraftReferencedImageIds(stillUsed, galleryInputDraft)
@@ -2414,7 +2514,7 @@ async function continueRecoveredAgentRound(taskId: string) {
             : currentRound,
         ),
       }))
-      showTaskCompletionNotification('Agent 回复失败', '请回到应用查看详情。', 'task-failure')
+      if (!isConversationHiddenByPrivacyMode(conversation.id)) showTaskCompletionNotification('Agent 回复失败', '请回到应用查看详情。', 'task-failure')
     }
 
     const recovered = createReadyAgentRecoveredToolState(round, latestState.tasks)
@@ -2901,7 +3001,7 @@ async function executeAgentRound(
         agentToolAction: image.action,
       })
       useStore.getState().setTaskStreamPreview(taskId)
-      if (localSaveError) useStore.getState().showToast(localSaveError, 'error')
+      if (localSaveError && !isTaskHiddenByPrivacyMode(latestBeforeUpdate)) useStore.getState().showToast(localSaveError, 'error')
       return { taskId, committed: true }
     }
 
@@ -3000,9 +3100,11 @@ async function executeAgentRound(
     let pendingToolTextSeparator = false
 
     // Helper: resolve reference image ids to data URLs for batch image calls
-    const resolveReferenceImages = async (referenceIds: string[]): Promise<{ dataUrls: string[]; imageIds: string[] }> => {
+    const resolveReferenceImages = async (referenceIds: string[]): Promise<{ dataUrls: string[]; imageIds: string[]; sourceUrls: (string | null)[] }> => {
       const dataUrls: string[] = []
       const imageIds: string[] = []
+      const sourceUrls: (string | null)[] = []
+      const imageSourceUrls = useStore.getState().imageSourceUrls
       for (const refId of referenceIds) {
         // Resolve both generated image refs and current/user input refs from XML tags.
         const latestConv = useStore.getState().agentConversations.find((item) => item.id === conversationId)
@@ -3013,7 +3115,10 @@ async function executeAgentRound(
             if (currentRefId === refId) {
               const imageId = r.inputImageIds[imgIdx]
               const dataUrl = await ensureImageCached(imageId)
-              if (dataUrl) dataUrls.push(dataUrl)
+              if (dataUrl) {
+                dataUrls.push(dataUrl)
+                sourceUrls.push(imageSourceUrls[imageId] ?? null)
+              }
               imageIds.push(imageId)
             }
           }
@@ -3024,13 +3129,16 @@ async function executeAgentRound(
               const imageId = outputImages[imgIdx]
               if (!imageId) continue
               const dataUrl = await ensureImageCached(imageId)
-              if (dataUrl) dataUrls.push(dataUrl)
+              if (dataUrl) {
+                dataUrls.push(dataUrl)
+                sourceUrls.push(imageSourceUrls[imageId] ?? null)
+              }
               imageIds.push(imageId)
             }
           }
         }
       }
-      return { dataUrls, imageIds }
+      return { dataUrls, imageIds, sourceUrls }
     }
 
     const parseSingleImageCallArguments = (args: string): { id: string; prompt: string } | null => {
@@ -3049,6 +3157,7 @@ async function executeAgentRound(
       taskId: string
       prompt: string
       referenceImageDataUrls: string[]
+      referenceImageSourceUrls?: (string | null)[]
       taskParams: TaskParams
       signal: AbortSignal
       onPartialImage?: (event: { image: string; partialImageIndex?: number }) => void | Promise<void>
@@ -3058,6 +3167,7 @@ async function executeAgentRound(
         prompt: replaceImageMentionsForApi(opts.prompt, opts.referenceImageDataUrls.length),
         params: opts.taskParams,
         inputImageDataUrls: opts.referenceImageDataUrls,
+        inputImageUrls: opts.referenceImageSourceUrls,
         skipCodexCliSizePrompt: true,
         onPartialImage: opts.onPartialImage
           ? (partial) => {
@@ -3123,6 +3233,7 @@ async function executeAgentRound(
           taskId,
           prompt: item.prompt,
           referenceImageDataUrls: references.dataUrls,
+          referenceImageSourceUrls: references.sourceUrls,
           taskParams,
           signal: controller.signal,
           onPartialImage: async ({ image, partialImageIndex }) => {
@@ -3199,6 +3310,7 @@ async function executeAgentRound(
                 taskId: taskIdByToolCallId.get(batchToolCallId)!,
                 prompt: item.prompt,
                 referenceImageDataUrls: references.dataUrls,
+                referenceImageSourceUrls: references.sourceUrls,
                 taskParams,
                 signal: controller.signal,
                 onPartialImage: async ({ image, partialImageIndex }) => {
@@ -3461,7 +3573,7 @@ async function executeAgentRound(
         useStore.getState().setTasks([completedTask, ...useStore.getState().tasks])
         attachTaskToAgentRound(completedTask.id)
         await putTask(completedTask)
-        if (completedTask.localSaveError) useStore.getState().showToast(completedTask.localSaveError, 'error')
+        if (completedTask.localSaveError && !isTaskHiddenByPrivacyMode(completedTask)) useStore.getState().showToast(completedTask.localSaveError, 'error')
       }
 
       if (result.rawResponsePayload && streamingTaskIds.length > 0) {
@@ -3637,11 +3749,13 @@ async function executeAgentRound(
         : [...current.messages, assistantMessage],
     }))
 
-    useStore.getState().showToast(outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复', 'success')
-    showTaskCompletionNotification(
-      outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复',
-      outputIds.length > 0 ? `Agent 回复已结束，共生成 ${outputIds.length} 张图片。` : 'Agent 回复已结束。',
-    )
+    if (!isConversationHiddenByPrivacyMode(conversationId)) {
+      useStore.getState().showToast(outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复', 'success')
+      showTaskCompletionNotification(
+        outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复',
+        outputIds.length > 0 ? `Agent 回复已结束，共生成 ${outputIds.length} 张图片。` : 'Agent 回复已结束。',
+      )
+    }
   } catch (err) {
     if (controller.signal.aborted) {
       if (markAgentRoundStopped(conversationId, roundId)) {
@@ -3697,8 +3811,10 @@ async function executeAgentRound(
             ],
       }
     })
-    useStore.getState().showToast(`Agent 请求失败：${message}`, 'error')
-    showTaskCompletionNotification('Agent 回复失败', '请回到应用查看详情。', 'task-failure')
+    if (!isConversationHiddenByPrivacyMode(conversationId)) {
+      useStore.getState().showToast(`Agent 请求失败：${message}`, 'error')
+      showTaskCompletionNotification('Agent 回复失败', '请回到应用查看详情。', 'task-failure')
+    }
   } finally {
     if (agentRoundControllers.get(controllerKey) === controller) {
       agentRoundControllers.delete(controllerKey)
@@ -3779,6 +3895,7 @@ async function executeTask(taskId: string) {
       params: task.params,
       nativeTransparentBackground: task.params.transparent_output && !task.transparentOutput,
       inputImageDataUrls: inputDataUrls,
+      inputImageUrls: task.inputImageIds.map((id) => useStore.getState().imageSourceUrls[id] ?? null),
       maskDataUrl,
       skipCodexCliSizePrompt: task.sourceMode === 'agent',
       onFalRequestEnqueued: (request) => {
@@ -3870,7 +3987,7 @@ async function executeTask(taskId: string) {
       ? `生成完成：成功 ${outputIds.length} 张，失败 ${failedCount} 张`
       : `生成完成，共 ${outputIds.length} 张图片`
     // 批量任务只在整批结束时统一提示
-    if (!batchTaskIds.has(taskId)) {
+    if (!batchTaskIds.has(taskId) && !isTaskHiddenByPrivacyMode(task)) {
       useStore.getState().showToast(localSaveError || completionMessage, localSaveError || failedCount > 0 ? 'error' : 'success')
       if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `${completionMessage}。`)
     }
@@ -3931,7 +4048,7 @@ async function executeTask(taskId: string) {
         customRecoverable: false,
       })
       // 批量任务不自动打开失败详情，避免连续弹窗打断
-      if (!batchTaskIds.has(taskId)) useStore.getState().setDetailTaskId(taskId)
+      if (!batchTaskIds.has(taskId) && !isTaskHiddenByPrivacyMode(task)) useStore.getState().setDetailTaskId(taskId)
       showTaskFailureNotification(task)
     }
   } finally {
@@ -4492,6 +4609,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
       activeAgentConversationId: null,
       supportPromptOpen: false,
       supportPromptSkippedForImportedData: false,
+      imageSourceUrls: {},
     })
     clearInputImages()
     clearMaskDraft()
@@ -4540,9 +4658,11 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     ...createTaskDonePatch(task, Date.now()),
     customRecoverable: false,
   })
-  useStore.getState().showToast(localSaveError || `自定义异步任务已恢复，共 ${outputIds.length} 张图片`, localSaveError ? 'error' : 'success')
-  if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `自定义异步任务已恢复，共 ${outputIds.length} 张图片。`)
-  else void continueRecoveredAgentRound(task.id)
+  if (!isTaskHiddenByPrivacyMode(task)) {
+    useStore.getState().showToast(localSaveError || `自定义异步任务已恢复，共 ${outputIds.length} 张图片`, localSaveError ? 'error' : 'success')
+    if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `自定义异步任务已恢复，共 ${outputIds.length} 张图片。`)
+  }
+  if (isAgentTask(task)) void continueRecoveredAgentRound(task.id)
 }
 
 async function recoverCustomTask(taskId: string) {
@@ -4599,6 +4719,7 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
       settings,
       tasks,
       imageTasks: tasks,
+      imageSourceUrls: state.imageSourceUrls,
       favoriteCollections,
       defaultFavoriteCollectionId,
       agentConversations: options.exportTasks ? getPersistableAgentConversations(agentConversations) : [],
@@ -4763,6 +4884,11 @@ export async function importData(input: File | File[], options: ImportOptions = 
             height: info.height,
           })
           cacheImage(id, dataUrl)
+          // 备份文件来自外部，只接受 http(s) 链接
+          if (isHttpUrl(info.sourceUrl)) {
+            const sourceUrl = info.sourceUrl
+            useStore.setState((s) => ({ imageSourceUrls: { ...s.imageSourceUrls, [id]: sourceUrl } }))
+          }
           importedImageIds.push(id)
         }
 
@@ -4874,11 +5000,20 @@ export async function importData(input: File | File[], options: ImportOptions = 
   }
 }
 
+async function addImageToInput(image: InputImage, maxImages: number) {
+  try {
+    useStore.getState().addInputImage(image, maxImages)
+  } catch (err) {
+    await deleteStoredImageIfUnreferenced(image.id)
+    throw err
+  }
+}
+
 /** 添加图片到输入（文件上传） */
-export async function addImageFromFile(file: File): Promise<void> {
+export async function addImageFromFile(file: File, maxImages = MAX_INPUT_IMAGES): Promise<void> {
   const image = await createInputImageFromFile(file)
   if (!image) return
-  useStore.getState().addInputImage(image)
+  await addImageToInput(image, maxImages)
 }
 
 export async function createInputImageFromFile(file: File): Promise<InputImage | null> {
@@ -4886,16 +5021,21 @@ export async function createInputImageFromFile(file: File): Promise<InputImage |
   const dataUrl = await fileToDataUrl(file)
   const id = await storeImage(dataUrl, 'upload')
   cacheImage(id, dataUrl)
+  // 本地添加的图片即使与链接添加的内容相同，也不再沿用当时的链接，以免提交已过期的链接
+  forgetImageSourceUrl(id)
   return { id, dataUrl }
 }
 
-/** 添加图片到输入（右键菜单）—— 支持 data/blob/http URL */
-export async function addImageFromUrl(src: string): Promise<void> {
+/** 添加图片到输入（右键菜单、添加链接）—— 支持 data/blob/http URL */
+export async function addImageFromUrl(src: string, maxImages = MAX_INPUT_IMAGES): Promise<void> {
   const res = await apiFetch(src)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const blob = await res.blob()
   if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
   const dataUrl = await blobToDataUrl(blob)
   const id = await storeImage(dataUrl, 'upload')
   cacheImage(id, dataUrl)
-  useStore.getState().addInputImage({ id, dataUrl })
+  await addImageToInput({ id, dataUrl }, maxImages)
+  // 内容相同的图片共用一个 id，记录最近一次添加的链接
+  if (isHttpUrl(src)) useStore.setState((s) => ({ imageSourceUrls: { ...s.imageSourceUrls, [id]: src } }))
 }

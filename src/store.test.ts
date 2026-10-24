@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
-import { DEFAULT_PARAMS } from './types'
+import { DEFAULT_PARAMS, MAX_INPUT_IMAGES } from './types'
 import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, normalizeSettings } from './lib/apiProfiles'
 import type { AgentConversation, ExportData, StoredImage, StoredImageThumbnail, TaskRecord } from './types'
 import { getSelectedImageMentionLabel } from './lib/promptImageMentions'
@@ -143,7 +143,7 @@ import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, retryTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { addImageFromFile, addImageFromUrl, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, retryTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -5966,5 +5966,275 @@ describe('local image archive result integrity', () => {
     expect(JSON.stringify(payload)).not.toContain(other.apiKey)
     expect(useStore.getState().tasks[0].localSaveError).toBeUndefined()
     expect(callImageApi).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('privacy mode', () => {
+  const responsesProfile = createDefaultOpenAIProfile({
+    id: 'responses-profile',
+    apiKey: 'test-key',
+    apiMode: 'responses',
+    model: DEFAULT_RESPONSES_MODEL,
+  })
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    vi.mocked(callImageApi).mockReset()
+    vi.mocked(showBrowserNotification).mockClear()
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [responsesProfile],
+        activeProfileId: responsesProfile.id,
+        taskCompletionNotification: true,
+      }),
+      privacyMode: null,
+      appMode: 'gallery',
+      prompt: 'secret prompt',
+      inputImages: [imageA],
+      maskDraft: null,
+      maskEditorImageId: null,
+      galleryInputDraft: null,
+      agentInputDrafts: { 'conversation-a': { prompt: 'agent draft', inputImages: [], maskDraft: null, maskEditorImageId: null, updatedAt: 1 } },
+      params: { ...DEFAULT_PARAMS },
+      tasks: [task({ id: 'old-task', createdAt: 1 })],
+      agentConversations: [agentConversation({ id: 'conversation-a', messages: [{ id: 'm', role: 'user', content: 'hi', roundId: 'r', createdAt: 1 }] })],
+      activeAgentConversationId: 'conversation-a',
+      searchQuery: 'secret',
+      filterFavorite: true,
+      showSettings: true,
+      detailTaskId: 'old-task',
+      confirmDialog: { title: '确认', message: '内容' },
+      showToast: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    useStore.setState({ privacyMode: null })
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('clears views and input on entry, keeps the previous input persisted, and restores it on exit', () => {
+    const epoch = useStore.getState().privacyModeEpoch
+    useStore.getState().togglePrivacyMode()
+
+    const state = useStore.getState()
+    expect(state.privacyMode).not.toBeNull()
+    expect(state.privacyModeEpoch).toBe(epoch + 1)
+    expect(state).toMatchObject({
+      prompt: '',
+      inputImages: [],
+      agentInputDrafts: {},
+      activeAgentConversationId: null,
+      searchQuery: '',
+      filterFavorite: false,
+      showSettings: false,
+      detailTaskId: null,
+      confirmDialog: null,
+    })
+    const persisted = getPersistedState(state)
+    expect(persisted.prompt).toBe('secret prompt')
+    expect(persisted.agentInputDrafts['conversation-a']?.prompt).toBe('agent draft')
+
+    useStore.getState().setPrompt('typed in privacy mode')
+    useStore.getState().togglePrivacyMode()
+
+    expect(useStore.getState().privacyMode).toBeNull()
+    expect(useStore.getState().prompt).toBe('secret prompt')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+    expect(useStore.getState().agentInputDrafts['conversation-a']?.prompt).toBe('agent draft')
+  })
+
+  it('drops notifications of tasks started before entry and keeps those of new tasks', async () => {
+    const pending = deferred<never>()
+    vi.mocked(callImageApi).mockReturnValueOnce(pending.promise)
+    useStore.setState({ tasks: [], inputImages: [] })
+    await submitTask()
+    const oldTaskId = useStore.getState().tasks[0].id
+
+    useStore.getState().togglePrivacyMode()
+    pending.reject(new Error('接口报错'))
+    await vi.waitFor(() => expect(useStore.getState().tasks.find((item) => item.id === oldTaskId)?.status).toBe('error'))
+    expect(showBrowserNotification).not.toHaveBeenCalled()
+    expect(useStore.getState().detailTaskId).toBeNull()
+
+    vi.mocked(callImageApi).mockRejectedValueOnce(new Error('接口报错'))
+    useStore.getState().setPrompt('new prompt')
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+    expect(showBrowserNotification).toHaveBeenCalledOnce()
+    expect(useStore.getState().detailTaskId).toBe(useStore.getState().tasks[0].id)
+  })
+
+  it.each(['streaming', 'response'])('keeps hidden Agent %s images and archive errors without displaying a toast', async (delivery) => {
+    const image = { toolCallId: 'privacy-image-tool', dataUrl: 'data:image/png;base64,1024x1024-private-agent-image' }
+    const pending = deferred<void>()
+    const profile = createDefaultOpenAIProfile({ ...responsesProfile, streamImages: delivery === 'streaming' })
+    const fetch = vi.fn().mockResolvedValue(new Response('{"error":{"code":"local_save_failed","message":"磁盘写入失败"}}', { status: 507 }))
+    vi.stubGlobal('window', { location: new URL('http://127.0.0.1:17865/'), __LOCAL_IMAGE_BOOTSTRAP__: { preset: 'offline-fixture', token: 'test-only-local-session', bridgeVersion: 2 } })
+    vi.stubGlobal('fetch', fetch)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(callAgentResponsesApi).mockReset().mockImplementationOnce(async (opts) => {
+      if (delivery === 'streaming') await opts.onImageToolStarted?.({ toolCallId: image.toolCallId })
+      await pending.promise
+      if (delivery === 'streaming') await opts.onImageToolCompleted?.(image)
+      return { text: '图片已生成', images: delivery === 'streaming' ? [] : [image], outputItems: [], responseId: 'private-agent-response' }
+    })
+    useStore.setState({
+      settings: normalizeSettings({ ...useStore.getState().settings, profiles: [profile], activeProfileId: profile.id }),
+      appMode: 'agent', inputImages: [], tasks: [], agentEditingRoundId: null,
+    })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledTimes(1))
+    useStore.getState().togglePrivacyMode()
+    pending.resolve()
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0].rounds[0]?.status).toBe('done'))
+
+    const saved = useStore.getState().tasks[0]
+    expect(saved.status).toBe('done')
+    expect(saved.outputImages).toHaveLength(1)
+    expect(saved.localSaveError).toContain('图片已经生成，但本地保存失败')
+    expect(await getImage(saved.outputImages[0])).toMatchObject({ dataUrl: image.dataUrl })
+    expect(await getAllTasks()).toEqual([saved])
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(console.error).toHaveBeenCalled()
+    expect(useStore.getState().showToast).not.toHaveBeenCalled()
+    expect(showBrowserNotification).not.toHaveBeenCalled()
+  })
+})
+
+describe('input image insertion limits', () => {
+  beforeEach(async () => {
+    await clearImages()
+    useStore.setState({
+      appMode: 'gallery', inputImages: [], galleryInputDraft: null, agentInputDrafts: {},
+      tasks: [], agentConversations: [], privacyMode: null, imageSourceUrls: {},
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('keeps repeated image IDs idempotent at capacity and rejects a new image', () => {
+    useStore.setState({ inputImages: [imageA] })
+    expect(() => useStore.getState().addInputImage(imageA, 1)).not.toThrow()
+    expect(() => useStore.getState().addInputImage(imageB, 1)).toThrow('参考图数量已达上限（1 张）')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+  })
+
+  it.each(['url', 'file'])('checks the same capacity after asynchronous %s image reading', async (source) => {
+    const pending = deferred<ArrayBuffer>()
+    const blob = new Blob([Uint8Array.of(1)], { type: 'image/png' })
+    const read = vi.spyOn(blob, 'arrayBuffer').mockReturnValueOnce(pending.promise)
+    const response = new Response(blob)
+    vi.spyOn(response, 'blob').mockResolvedValueOnce(blob)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(response))
+    const adding = source === 'url'
+      ? addImageFromUrl('https://images.example.test/async.png', 1)
+      : addImageFromFile(blob as File, 1)
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce())
+    useStore.getState().addInputImage(imageA, 1)
+
+    const rejected = expect(adding).rejects.toThrow('参考图数量已达上限（1 张）')
+    pending.resolve(Uint8Array.of(1).buffer)
+    await rejected
+
+    expect(useStore.getState().inputImages).toEqual([imageA])
+    expect(useStore.getState().imageSourceUrls).toEqual({})
+    expect(await getAllImageIds()).toEqual([])
+  })
+
+  it('uses the existing default limit when a URL caller omits it', async () => {
+    const images = Array.from({ length: MAX_INPUT_IMAGES }, (_, index) => ({ id: `input-${index}`, dataUrl: imageA.dataUrl }))
+    useStore.setState({ inputImages: images })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(new Blob([Uint8Array.of(1)], { type: 'image/png' }))))
+
+    await expect(addImageFromUrl('https://images.example.test/default.png')).rejects.toThrow(`参考图数量已达上限（${MAX_INPUT_IMAGES} 张）`)
+    expect(useStore.getState().inputImages).toEqual(images)
+    expect(useStore.getState().imageSourceUrls).toEqual({})
+    expect(await getAllImageIds()).toEqual([])
+  })
+
+  it('rejects URL images for a text-only image interface', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(new Blob([Uint8Array.of(1)], { type: 'image/png' }))))
+
+    await expect(addImageFromUrl('https://images.example.test/unsupported.png', 0)).rejects.toThrow('当前图片接口只支持文生图')
+    expect(useStore.getState().inputImages).toEqual([])
+    expect(useStore.getState().imageSourceUrls).toEqual({})
+    expect(await getAllImageIds()).toEqual([])
+  })
+
+  it('records a URL after the image has been successfully inserted', async () => {
+    const url = 'https://images.example.test/reference.png'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(new Blob([Uint8Array.of(1)], { type: 'image/png' }))))
+
+    await addImageFromUrl(url, 1)
+
+    const images = useStore.getState().inputImages
+    expect(images).toHaveLength(1)
+    expect(await getImage(images[0].id)).toMatchObject({ dataUrl: images[0].dataUrl })
+    expect(useStore.getState().imageSourceUrls).toEqual({ [images[0].id]: url })
+  })
+})
+
+describe('legacy local data upgrade', () => {
+  it('restores provider credentials and native image settings without losing archived task output', async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    vi.mocked(callImageApi).mockReset()
+    vi.mocked(callAgentResponsesApi).mockReset()
+    vi.mocked(deleteDbImage).mockClear()
+    useStore.setState({
+      appMode: 'gallery', tasks: [], inputImages: [], galleryInputDraft: null, agentInputDrafts: {},
+      agentConversations: [], activeAgentConversationId: null, privacyMode: null, imageSourceUrls: {},
+    })
+    const profile = createDefaultOpenAIProfile({
+      id: 'legacy-native-provider', name: '既有生图供应商', apiKey: 'test-only-existing-provider-key',
+      baseUrl: 'https://legacy.example.test/v1', model: 'gemini-3-pro-image-preview,gemini-2.5-flash-image',
+      selectedModel: 'gemini-2.5-flash-image', imageApiDialect: 'gemini', imageAspectRatio: '16:9', imageResolution: '2K',
+    })
+    const managedProfile = createDefaultOpenAIProfile({ id: 'legacy-managed-provider', apiKey: 'local-managed-key' })
+    const oldTask = task({
+      id: 'legacy-local-task', apiProvider: profile.provider, apiProfileId: profile.id, apiProfileName: profile.name,
+      apiModel: profile.selectedModel, apiBaseUrl: profile.baseUrl, imageApiDialect: profile.imageApiDialect,
+      imageAspectRatio: profile.imageAspectRatio, imageResolution: profile.imageResolution,
+      outputImages: ['legacy-output'], localSaveError: '图片已经生成，但本地保存失败：磁盘写入失败。',
+    })
+    const output: StoredImage = {
+      id: 'legacy-output', dataUrl: 'data:image/png;base64,1024x1024-existing-output', source: 'generated',
+      width: 1024, height: 1024, createdAt: 1,
+    }
+    await putDbTask(oldTask)
+    await putImage(output)
+    await putImageThumbnail({ id: output.id, thumbnailDataUrl: output.dataUrl, width: 1024, height: 1024, thumbnailVersion: 2 })
+
+    const restored = normalizePersistedState({
+      settings: { ...DEFAULT_SETTINGS, profiles: [profile, managedProfile], activeProfileId: profile.id },
+      appMode: 'gallery', prompt: '既有提示词', inputImages: [],
+    }, useStore.getState())!
+    useStore.setState(restored.state)
+    await initStore()
+
+    const state = useStore.getState()
+    expect(state.settings.profiles.find((item) => item.id === profile.id)).toMatchObject({
+      apiKey: profile.apiKey, selectedModel: profile.selectedModel, imageApiDialect: 'gemini',
+      imageAspectRatio: '16:9', imageResolution: '2K',
+    })
+    expect(state.settings.profiles.find((item) => item.id === managedProfile.id)?.apiKey).toBe('local-managed-key')
+    expect(state.settings.activeProfileId).toBe(profile.id)
+    expect(state.tasks[0]).toMatchObject(oldTask)
+    expect((await getAllTasks())[0]).toMatchObject(oldTask)
+    expect(await getImage(output.id)).toEqual(output)
+    expect(state.imageSourceUrls).toEqual({})
+    expect(deleteDbImage).not.toHaveBeenCalled()
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(callAgentResponsesApi).not.toHaveBeenCalled()
   })
 })
