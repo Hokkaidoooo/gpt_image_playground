@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { readText } from '@tauri-apps/plugin-clipboard-manager'
 import { normalizeBaseUrl } from '../lib/api'
 import { customProviderSupportsNativeTransparentBackground } from '../lib/customProviderCapabilities'
+import { getImageProviderCapabilities, normalizeGoogleImageBaseUrl } from '../lib/imageProvider'
 import { hasActiveDataOperations, trackDataTransfer } from '../lib/dataOperations'
 import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from '../lib/devProxy'
 import { isTauri } from '../lib/platform'
@@ -67,6 +68,7 @@ import ProfileImportUrlModal, { type CopyImportUrlOptions } from './settings/Pro
 import ZipDownloadRouteModal, { ZIP_DOWNLOAD_ROUTE_OPTIONS } from './settings/ZipDownloadRouteModal'
 import StorageInfoSection from './settings/StorageInfoSection'
 import AboutSettingsTab from './settings/AboutSettingsTab'
+import ImageModelsPanel from './settings/ImageModelsPanel'
 import MarkdownRenderer from './MarkdownRenderer'
 
 function newId(prefix: string) {
@@ -244,6 +246,9 @@ export default function SettingsModal() {
   const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
   const activePresetDescription = getPresetProfileDescription(activeProfile.id)
   const activeProfileLocked = isPresetProfileLocked(activeProfile.id)
+  const activeImageCapabilities = getImageProviderCapabilities(activeProfile)
+  const localBootstrap = typeof window === 'undefined' ? undefined : window.__LOCAL_IMAGE_BOOTSTRAP__
+  const activeProfileHasManagedKey = Boolean(localBootstrap?.managedKeyMarker && activeProfile.apiKey === localBootstrap.managedKeyMarker)
   const activeProviderIsOpenAICompatible = isOpenAICompatibleProvider(draft, activeProfile.provider)
   const activeProviderUsesApiUrl = activeProviderIsOpenAICompatible || activeProfile.provider === 'fal'
   const activeCustomProvider = getCustomProviderDefinition(draft, activeProfile.provider)
@@ -256,7 +261,7 @@ export default function SettingsModal() {
   const providerOrder = draft.providerOrder || defaultProviderOrder
 
   const unorderedProviderOptions = [
-    { label: 'OpenAI 兼容接口', value: 'openai', draggable: true },
+    { label: '通用 API（OpenAI / Grok / Gemini）', value: 'openai', draggable: true },
     { label: 'sub2api（异步）', value: 'sb2api-async', draggable: true },
     { label: 'fal.ai', value: 'fal', draggable: true },
     ...draft.customProviders.map((provider) => {
@@ -434,6 +439,8 @@ export default function SettingsModal() {
 
   const commitSettings = (nextDraft: AppSettings) => {
     const normalizedProfiles = nextDraft.profiles.map((profile) => {
+      const imageCapabilities = getImageProviderCapabilities(profile)
+      const isGoogleImageApi = imageCapabilities.nativeParameters && imageCapabilities.dialect !== 'xai'
       const nextApiProxy = isProfileApiProxyEligible(nextDraft, profile) && apiProxyAvailable ? (apiProxyLocked || profile.apiProxy) : false
       const shouldKeepEmptyBaseUrl = profile.provider !== 'fal' && nextApiProxy && !profile.baseUrl.trim()
       const emptyBaseUrlFallback = profile.id === defaultProfileId
@@ -441,7 +448,9 @@ export default function SettingsModal() {
         : DEFAULT_SETTINGS.baseUrl
       const normalizedBaseUrl = profile.provider === 'fal'
         ? profile.baseUrl.trim().replace(/\/+$/, '') || (profile.id === defaultProfileId ? '' : DEFAULT_FAL_BASE_URL)
-        : shouldKeepEmptyBaseUrl ? '' : normalizeBaseUrl(profile.baseUrl.trim() || emptyBaseUrlFallback)
+        : shouldKeepEmptyBaseUrl ? '' : isGoogleImageApi
+        ? profile.baseUrl.trim()
+        : normalizeBaseUrl(profile.baseUrl.trim() || emptyBaseUrlFallback)
       const defaultModel = profile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(profile.apiMode)
       return {
         ...profile,
@@ -490,13 +499,20 @@ export default function SettingsModal() {
 
     if (profile.provider === 'openai') {
       const baseUrl = profile.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl
-      url.searchParams.set('apiUrl', options.useNewApiAddress && !options.includeApiKey ? '{address}' : normalizeBaseUrl(baseUrl))
+      const imageCapabilities = getImageProviderCapabilities(profile)
+      const importBaseUrl = imageCapabilities.nativeParameters && imageCapabilities.dialect !== 'xai'
+        ? normalizeGoogleImageBaseUrl(baseUrl)
+        : normalizeBaseUrl(baseUrl)
+      url.searchParams.set('apiUrl', options.useNewApiAddress && !options.includeApiKey ? '{address}' : importBaseUrl)
       if (options.includeApiKey && profile.apiKey.trim()) {
         url.searchParams.set('apiKey', profile.apiKey.trim())
       } else if (!options.includeApiKey && options.useNewApiKey) {
         url.searchParams.set('apiKey', '{key}')
       }
       url.searchParams.set('apiMode', profile.apiMode)
+      if (profile.imageApiDialect) url.searchParams.set('imageApiDialect', profile.imageApiDialect)
+      if (profile.imageAspectRatio) url.searchParams.set('imageAspectRatio', profile.imageAspectRatio)
+      if (profile.imageResolution) url.searchParams.set('imageResolution', profile.imageResolution)
       const model = profile.model.trim() || getDefaultModelForMode(profile.apiMode)
       url.searchParams.set('model', !options.includeApiKey && options.useNewApiModel ? '{model}' : model)
       if (profile.apiMode === 'responses') url.searchParams.set('imageGenerationModel', profile.imageGenerationModel?.trim() ?? '')
@@ -1509,6 +1525,8 @@ export default function SettingsModal() {
                       <span className="text-yellow-600 dark:text-yellow-500">已开启代理，实际请求目标由部署端决定，此处设置被忽略。</span>
                     ) : activeProfile.provider === 'fal' ? (
                       <span>默认使用 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">{DEFAULT_FAL_BASE_URL}</code>；填写自定义地址时将作为 fal.ai 代理 URL。</span>
+                    ) : activeImageCapabilities.nativeParameters && activeImageCapabilities.dialect !== 'xai' ? (
+                      <span>填写供应商的原生 API 地址，可包含 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/v1beta</code> 等版本前缀。</span>
                     ) : (
                       <span>末尾带 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/</code> 时直接使用该地址拼接接口，不补 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/v1</code> 前缀；支持通过链接参数导入（打开时会先确认）：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiUrl=</code>。</span>
                     )}
@@ -1546,11 +1564,11 @@ export default function SettingsModal() {
                 <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">API Key</span>
                 <div className="relative">
                   <input
-                    value={activeProfile.apiKey}
+                    value={activeProfileHasManagedKey ? '' : activeProfile.apiKey}
                     onChange={(e) => updateActiveProfile({ apiKey: e.target.value })}
-                    onBlur={(e) => commitActiveProfilePatch({ apiKey: e.target.value })}
+                    onBlur={(e) => { if (!activeProfileHasManagedKey || e.target.value) commitActiveProfilePatch({ apiKey: e.target.value }) }}
                     type={showApiKey ? 'text' : 'password'}
-                    placeholder={activeProfile.provider === 'fal' ? 'FAL_KEY' : 'sk-...'}
+                    placeholder={activeProfileHasManagedKey ? '已保存加密密钥；输入以替换' : activeProfile.provider === 'fal' ? 'FAL_KEY' : '填写供应商 API Key'}
                     className="w-full rounded-xl border border-transparent bg-black/[0.04] px-3 py-2.5 pr-10 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:bg-white/[0.06] dark:text-gray-200 dark:focus:border-blue-500/50"
                   />
                   <button
@@ -1575,6 +1593,7 @@ export default function SettingsModal() {
                   </button>
                 </div>
                 <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
+                  {activeProfileHasManagedKey && <>已有加密密钥；更换供应商时请填写对应密钥。 </>}
                   支持通过链接参数导入：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiKey=</code>
                 </div>
               </div>
@@ -1590,7 +1609,7 @@ export default function SettingsModal() {
                       updateActiveProfile({ apiMode }, true)
                     }}
                     options={[
-                      { label: 'Images API (/v1/images)', value: 'images' },
+                      { label: '图片生成（Images / Grok / Gemini）', value: 'images' },
                       { label: 'Responses API (/v1/responses)', value: 'responses' },
                     ]}
                     disabled={activeProfileLocked}
@@ -1600,6 +1619,15 @@ export default function SettingsModal() {
                     支持通过链接参数导入：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">apiMode=images</code> 或 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">apiMode=responses</code>。
                   </div>
                 </div>
+              )}
+
+              {activeProfile.provider === 'openai' && activeProfile.apiMode === 'images' && (
+                <ImageModelsPanel
+                  key={activeProfile.id}
+                  profile={activeProfile}
+                  onPatch={(patch) => updateActiveProfile(patch, true)}
+                  disabled={activeProfileLocked}
+                />
               )}
 
               {/* 7. 模型 ID（紧跟接口选择） */}
@@ -1628,7 +1656,7 @@ export default function SettingsModal() {
                   ) : (activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode) === 'responses' ? (
                     <>Responses API 需要使用支持 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">image_generation</code> 工具的文本模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_RESPONSES_MODEL}</code>。</>
                   ) : (
-                    <>Images API 需要使用 GPT Image 模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_IMAGES_MODEL}</code>。</>
+                    <>填写当前供应商支持的生图模型 ID，可通过上方“获取模型”选择，也可手动输入。</>
                   )}
                   多个模型以逗号分隔，可在首页的模型参数中切换。
                   {activeProfile.provider === 'openai' && (
@@ -1681,7 +1709,7 @@ export default function SettingsModal() {
               )}
 
               {/* 8. 流式传输 + 中间步骤图像数 */}
-              {activeProfile.provider === 'openai' && (
+              {activeProfile.provider === 'openai' && !activeImageCapabilities.nativeParameters && (
                 <div className="block space-y-3">
                   <div>
                     <div className="mb-1.5 flex items-center justify-between gap-3">
@@ -1728,7 +1756,7 @@ export default function SettingsModal() {
               )}
 
               {/* 9. 透明背景实现方式 */}
-              <div className="block">
+              {!activeImageCapabilities.nativeParameters && <div className="block">
                 <div className="mb-1.5 flex items-center justify-between gap-3">
                   <span className="block text-sm text-gray-600 dark:text-gray-300">透明背景实现方式</span>
                   <div className="w-28 shrink-0">
@@ -1749,10 +1777,10 @@ export default function SettingsModal() {
                     ? `API 原生会请求接口直接生成透明背景，需当前接口支持；本地后处理会生成纯色背景并在${isTauri ? '本地' : '浏览器中'}去除。`
                     : <>当前自定义服务商 Manifest 未映射 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">$params.background</code>，无法使用 API 原生透明背景。</>}
                 </div>
-              </div>
+              </div>}
 
               {/* 10. 返回 Base64 图片数据 */}
-              {activeProviderIsOpenAICompatible && (
+              {activeProviderIsOpenAICompatible && !activeImageCapabilities.nativeParameters && (
                 <div className="block">
                   <div className="mb-1.5 flex items-center justify-between">
                     <span className="block text-sm text-gray-600 dark:text-gray-300">返回 Base64 图片数据</span>
@@ -1775,7 +1803,7 @@ export default function SettingsModal() {
               )}
 
               {/* 11. Codex CLI 兼容模式 */}
-              {activeProviderIsOpenAICompatible && (
+              {activeProviderIsOpenAICompatible && !activeImageCapabilities.nativeParameters && (
                 <div className="block">
                   <div className="mb-1.5 flex items-center justify-between">
                     <span className="block text-sm text-gray-600 dark:text-gray-300">Codex CLI 兼容模式</span>

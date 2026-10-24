@@ -629,6 +629,7 @@ export async function callAgentResponsesApi(opts: {
     }
 
     const response = await apiFetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+      timeoutSeconds: profile.timeout,
       method: 'POST',
       headers: createHeaders(profile),
       cache: 'no-store',
@@ -694,6 +695,7 @@ export async function callAgentConversationTitleApi(opts: {
     if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
 
     const response = await apiFetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+      timeoutSeconds: profile.timeout,
       method: 'POST',
       headers: createHeaders(profile),
       cache: 'no-store',
@@ -808,6 +810,7 @@ export async function callBatchImageSingle(opts: {
     }
 
     const response = await apiFetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+      timeoutSeconds: profile.timeout,
       method: 'POST',
       headers: createHeaders(profile),
       cache: 'no-store',

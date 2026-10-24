@@ -36,6 +36,7 @@ import { isTauri } from './lib/platform'
 import { setSaveToDefaultDir } from './lib/saveFile'
 import { setTauriLogEnabled } from './lib/tauriLog'
 import { getTauriStorageLoadError } from './lib/tauriStorage'
+import { hasLocalImageBridge } from './lib/localRuntime'
 
 let defaultConfigImportStarted = false
 
@@ -125,6 +126,9 @@ export default function App() {
 
     void initStore()
       .then(async () => {
+        if (hasLocalImageBridge() && window.__LOCAL_IMAGE_BOOTSTRAP__?.configurationError) {
+          useStore.getState().showToast(window.__LOCAL_IMAGE_BOOTSTRAP__.configurationError, 'error')
+        }
         const importedSettings = embeddedDefaultConfig || customProviderConfigUrl
           ? await loadDefaultConfig()
           : hasDefaultPresetConfig()

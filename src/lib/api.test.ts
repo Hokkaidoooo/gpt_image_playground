@@ -27,6 +27,25 @@ describe('callImageApi', () => {
     vi.useRealTimers()
   })
 
+  it('使用每张图片的实际格式，避免请求格式与结果不同导致下载扩展名错误', async () => {
+    const formats = ['png', 'jpeg', 'webp']
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      output_format: 'png',
+      data: formats.map((format) => ({ b64_json: 'aW1hZ2U=', output_format: format })),
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const result = await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
+      prompt: '仅用于图片格式单元测试',
+      params: { ...DEFAULT_PARAMS, output_format: 'png' },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(result.images).toEqual(formats.map((format) => `data:image/${format};base64,aW1hZ2U=`))
+    expect(result.actualParamsList).toEqual(formats.map((format) => ({ output_format: format })))
+  })
+
   it.each([false, true])(
     'adds the prompt rewrite guard on Responses API when Codex CLI mode is %s',
     async (codexCli) => {

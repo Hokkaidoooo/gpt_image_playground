@@ -1,6 +1,7 @@
 import type { AppSettings, ResponsesOutputItem, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
 import { apiFetch, isTauri } from './platform'
+import { hasLocalImageBridge } from './localRuntime'
 
 export const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -167,7 +168,7 @@ async function probeNoCorsReachability(url: string, timeoutMs = 8000): Promise<'
   }
 }
 
-export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal?: AbortSignal): Promise<string> {
+export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal?: AbortSignal, timeoutSeconds?: number): Promise<string> {
   if (isDataUrl(url)) return url
 
   let response: Response
@@ -175,11 +176,12 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
     response = await apiFetch(url, {
       cache: 'no-store',
       signal,
+      ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
     })
   } catch (err) {
     if (err instanceof TypeError) {
       // 客户端由 Rust 侧发出请求，不存在跨域问题，也不需要 no-cors 探测
-      if (isTauri) throw new Error(`图片链接下载失败（可能因链接过期或网络异常）。${IMAGE_FETCH_CORS_HINT}`)
+      if (isTauri || hasLocalImageBridge()) throw new Error('图片链接下载失败，请查看链接是否过期或网络是否中断；本次没有重新发送生图请求。')
       const probe = await probeNoCorsReachability(url)
       if (probe === 'opaque') {
         throw new Error(`图片已生成，但因服务商未允许跨域，图片链接下载失败。${IMAGE_FETCH_CORS_HINT}`)

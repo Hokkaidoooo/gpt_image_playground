@@ -3,7 +3,9 @@ import type { ApiProfile, AppSettings, BatchProgress, BatchPromptMode, TaskParam
 import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } from '../../lib/batchPrompts'
 import { isTauri } from '../../lib/platform'
 import { dismissAllTooltips } from '../../lib/tooltipDismiss'
+import { getImageProviderCapabilities } from '../../lib/imageProvider'
 import Select from '../Select'
+import { ImageParameterControls } from '../settings/ImageModelsPanel'
 import ButtonTooltip from './buttonTooltip'
 import ParamPopoverChip, { CHIP_BASE_CLASS, CHIP_IDLE_CLASS } from './paramPopoverChip'
 
@@ -99,6 +101,7 @@ export default function InputParamsPanel({
   activeProfile,
   modelOptions,
   onModelChange,
+  onProfileChange,
   isFalProvider,
   isFalTextToImage,
   displaySize,
@@ -149,6 +152,7 @@ export default function InputParamsPanel({
   activeProfile: ApiProfile
   modelOptions: Array<{ label: string; value: string }>
   onModelChange: (model: string) => void
+  onProfileChange: (patch: Partial<ApiProfile>) => void
   isFalProvider: boolean
   isFalTextToImage: boolean
   displaySize: string
@@ -194,6 +198,7 @@ export default function InputParamsPanel({
   onBatchChange: (patch: BatchSettingsPatch) => void
   onStopBatch: () => void
 }) {
+  const nativeParameters = getImageProviderCapabilities(activeProfile).nativeParameters
   // 折叠时也展示弹层内每一项的当前值，不支持的参数不显示
   const moreSummary = [
     params.output_format.toUpperCase(),
@@ -221,6 +226,9 @@ export default function InputParamsPanel({
           className={CHIP_CLASS}
         />
       </div>
+      {nativeParameters ? (
+        <ImageParameterControls profile={activeProfile} onPatch={onProfileChange} compactClassName={CHIP_CLASS} />
+      ) : <>
       <div
         className="relative max-sm:flex-auto sm:shrink-0"
         onMouseEnter={sizeHint.show}
@@ -270,6 +278,7 @@ export default function InputParamsPanel({
           text={isFalProvider ? <>fal.ai 不支持 <code className="rounded bg-white/10 px-1 py-0.5 font-mono">auto</code> 质量参数</> : 'Codex CLI 不支持质量参数'}
         />
       </div>
+      </>}
       <label
         className={`relative flex items-center max-sm:flex-auto sm:shrink-0 ${agentAutoImageCount ? CHIP_DISABLED_CLASS : `${CHIP_CLASS} cursor-text`}`}
         onMouseEnter={() => { showAgentNHint(); streamConcurrentHint.show() }}
@@ -312,7 +321,7 @@ export default function InputParamsPanel({
         <ButtonTooltip visible={nLimitHint.visible} text={nLimitHintText} />
         <ButtonTooltip visible={streamConcurrentByN && streamConcurrentHint.visible && !nLimitHint.visible} text="数量大于 1 时会将多图生成拆分为并发单图" />
       </label>
-      <ParamPopoverChip label="更多" summary={moreSummary} className="sm:min-w-[5rem]">
+      {!nativeParameters && <ParamPopoverChip label="更多" summary={moreSummary} className="sm:min-w-[5rem]">
             <div className={ROW_CLASS}>
               <span className={ROW_LABEL_CLASS}>格式</span>
               <div className="w-28">
@@ -430,7 +439,7 @@ export default function InputParamsPanel({
                 text="fal.ai 不支持审核参数"
               />
             </div>
-      </ParamPopoverChip>
+      </ParamPopoverChip>}
       {showBatch && (
         <ParamPopoverChip label="批量" summary={batchSummary} active={batchEnabled || Boolean(batchProgress)} className="sm:shrink-0">
           <div className={ROW_CLASS}>

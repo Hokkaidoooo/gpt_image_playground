@@ -238,17 +238,23 @@ async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, s
   const images: string[] = []
   const rawImageUrls = data.map((item) => item.url).filter(isHttpUrl)
   const revisedPrompts: Array<string | undefined> = []
+  const actualParams = mergeActualParams(pickActualParams(payload))
+  const actualParamsList: Array<Partial<TaskParams> | undefined> = []
   try {
     for (const item of data) {
       const b64 = item.b64_json
+      const itemParams = mergeActualParams(actualParams, pickActualParams(item))
+      const imageMime = itemParams?.output_format ? MIME_MAP[itemParams.output_format] : mime
       if (b64) {
-        images.push(normalizeBase64Image(b64, mime))
+        images.push(normalizeBase64Image(b64, imageMime))
+        actualParamsList.push(itemParams)
         revisedPrompts.push(typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined)
         continue
       }
 
       if (isHttpUrl(item.url) || isDataUrl(item.url)) {
-        images.push(await fetchImageUrlAsDataUrl(item.url, mime, signal))
+        images.push(await fetchImageUrlAsDataUrl(item.url, imageMime, signal))
+        actualParamsList.push(itemParams)
         revisedPrompts.push(typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined)
       }
     }
@@ -265,13 +271,10 @@ async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, s
     throw err
   }
 
-  const actualParams = mergeActualParams(
-    pickActualParams(payload),
-  )
   return {
     images,
     actualParams,
-    actualParamsList: images.map(() => actualParams),
+    actualParamsList,
     revisedPrompts,
     ...(rawImageUrls.length ? { rawImageUrls } : {}),
   }
@@ -563,6 +566,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       }
 
       response = await apiFetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+        timeoutSeconds: profile.timeout,
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
@@ -604,6 +608,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       }
 
       response = await apiFetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+        timeoutSeconds: profile.timeout,
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -828,6 +833,7 @@ async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: C
   }
 
   const response = await apiFetch(buildApiUrl(profile.baseUrl, path, proxyConfig, useApiProxy), {
+    timeoutSeconds: profile.timeout,
     method,
     headers,
     cache: 'no-store',
@@ -866,6 +872,7 @@ async function pollCustomTaskResult(
     let taskPayload: unknown
     try {
       const taskResponse = await apiFetch(buildApiUrl(profile.baseUrl, taskPath, proxyConfig, false), {
+        timeoutSeconds: profile.timeout,
         method: poll.method ?? 'GET',
         headers: requestHeaders,
         cache: 'no-store',
@@ -1047,6 +1054,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
     }
 
     const response = await apiFetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+      timeoutSeconds: profile.timeout,
       method: 'POST',
       headers: {
         ...requestHeaders,

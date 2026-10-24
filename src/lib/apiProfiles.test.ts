@@ -51,6 +51,20 @@ describe('validateApiProfile', () => {
 })
 
 describe('normalizeApiProfile', () => {
+  it('保留非GPT图片协议、比例和分辨率，并拒绝未知协议', () => {
+    const source = createDefaultOpenAIProfile({ imageApiDialect: 'gemini-interactions', imageAspectRatio: '16:9', imageResolution: '2K', model: 'gemini-nano-banana-2.1' })
+    const restored = normalizeApiProfile(JSON.parse(JSON.stringify(source)))
+    expect(restored).toMatchObject({ imageApiDialect: 'gemini-interactions', imageAspectRatio: '16:9', imageResolution: '2K', model: source.model })
+    expect(() => normalizeApiProfile({ imageApiDialect: 'unknown-image-protocol' })).toThrow('图片接口协议无效')
+  })
+
+  it('供应商类型切换后恢复各自图片协议草稿', () => {
+    const original = createDefaultOpenAIProfile({ imageApiDialect: 'xai', imageAspectRatio: '16:9', imageResolution: '2k', model: 'grok-imagine-image' })
+    const switched = switchApiProfileProvider(original, 'fal')
+    const restored = normalizeApiProfile(switchApiProfileProvider(switched, 'openai'))
+    expect(restored).toMatchObject({ imageApiDialect: 'xai', imageAspectRatio: '16:9', imageResolution: '2k' })
+  })
+
   it('uses the mode default and preserves the external model field', () => {
     expect(normalizeApiProfile({ apiMode: 'responses' }).model).toBe(DEFAULT_RESPONSES_MODEL)
     expect(normalizeSettings({ apiMode: 'responses' }).model).toBe(DEFAULT_RESPONSES_MODEL)
@@ -175,6 +189,15 @@ describe('default API URL env', () => {
       streamPartialImages: 3,
       transparentBackgroundMethod: 'local',
     })
+  })
+
+  it('keeps native image API settings in the actual default profile', async () => {
+    vi.resetModules()
+    vi.stubEnv('VITE_DEFAULT_API_URL', 'https://google.example.test/v1beta?apiMode=images&model=custom-image-model&imageApiDialect=gemini-interactions&imageAspectRatio=16%3A9&imageResolution=2K')
+    const apiProfiles = await import('./apiProfiles')
+    const expected = { baseUrl: 'https://google.example.test/v1beta', model: 'custom-image-model', imageApiDialect: 'gemini-interactions', imageAspectRatio: '16:9', imageResolution: '2K' }
+    expect(apiProfiles.createDefaultOpenAIProfile()).toMatchObject(expected)
+    expect(apiProfiles.DEFAULT_SETTINGS.profiles[0]).toMatchObject(expected)
   })
 
   it('keeps settings URLs out of the default API base URL', async () => {
@@ -616,6 +639,18 @@ describe('mergeImportedSettings', () => {
 })
 
 describe('mergePresetImportedSettings', () => {
+  it.each(['local-managed-key', 'test-only-user-entered-key'])('migrates the legacy local URL while retaining %s and user profiles', (apiKey) => {
+    const oldProfile = createDefaultOpenAIProfile({ id: 'local-orbitix', name: '本机生图', baseUrl: 'http://127.0.0.1:17865/v1', apiKey: 'local-managed-key', model: 'gpt-image-2.5-sunburst' })
+    const previousPresetConfig = { profiles: [oldProfile], customProviders: [] }
+    const custom = createDefaultOpenAIProfile({ id: 'another-provider', baseUrl: 'https://other.example.test/v1', apiKey: 'test-only-other-key', model: 'other-image' })
+    const current = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [{ ...oldProfile, apiKey, model: 'chosen-image, another-image', selectedModel: 'chosen-image' }, custom], activeProfileId: custom.id })
+    const next = { profiles: [{ ...oldProfile, baseUrl: 'https://upstream.example.test/v1', imageApiDialect: 'openai' as const }], customProviders: [] }
+    const result = mergeDefaultImportedSettings(current, next, { previousPresetConfig }).settings
+    expect(result.profiles.find((profile) => profile.id === oldProfile.id)).toMatchObject({ baseUrl: next.profiles[0].baseUrl, apiKey, model: 'chosen-image, another-image', selectedModel: 'chosen-image', imageApiDialect: 'openai' })
+    expect(result.profiles.find((profile) => profile.id === custom.id)).toEqual(custom)
+    expect(result.activeProfileId).toBe(custom.id)
+  })
+
   const createConfig = (model: string, path: string) => ({
     customProviders: [{
       id: 'source-provider',

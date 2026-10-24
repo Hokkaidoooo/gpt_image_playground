@@ -20,10 +20,10 @@ import type {
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
 import { customProviderSupportsNativeTransparentBackground } from './customProviderCapabilities'
 import { shouldUseApiProxy } from './devProxy'
-import { normalizeReasoningEffort, normalizeStreamPartialImages, parseDefaultApiUrl } from './defaultApiUrl'
+import { normalizeImageApiDialect, normalizeReasoningEffort, normalizeStreamPartialImages, parseDefaultApiUrl } from './defaultApiUrl'
 import { readRuntimeEnv } from './runtimeEnv'
 import { isImportableConfigUrl } from './importableConfigUrl'
-import { DEFAULT_IMAGES_MODEL } from './imageModels'
+import { DEFAULT_IMAGES_MODEL, normalizeModelList, resolveApiProfileModel } from './imageModels'
 import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } from './batchPrompts'
 import { normalizeFontMode } from './fonts'
 
@@ -35,7 +35,7 @@ const DEFAULT_API_URL_PATCH = isImportableConfigUrl(RAW_DEFAULT_API_URL)
   ? null
   : parseDefaultApiUrl(RAW_DEFAULT_API_URL || (DOCKER_DEPLOYMENT && DEFAULT_OPENAI_API_PROXY ? '' : OPENAI_DEFAULT_BASE_URL))
 const DEFAULT_BASE_URL = DEFAULT_API_URL_PATCH?.baseUrl ?? ''
-export { DEFAULT_IMAGES_MODEL } from './imageModels'
+export { DEFAULT_IMAGES_MODEL, splitModelList, normalizeModelList, resolveApiProfileModel } from './imageModels'
 export const DEFAULT_RESPONSES_MODEL = 'gpt-6.1-sol'
 export const DEFAULT_FAL_BASE_URL = 'https://fal.run'
 export const DEFAULT_FAL_MODEL = 'openai/gpt-image-2'
@@ -109,7 +109,7 @@ function getDefaultStreamImages(provider: ApiProvider, apiMode: ApiMode): boolea
   return provider === 'openai' && apiMode === 'responses'
 }
 
-export { normalizeReasoningEffort, normalizeStreamPartialImages } from './defaultApiUrl'
+export { normalizeImageApiDialect, normalizeReasoningEffort, normalizeStreamPartialImages } from './defaultApiUrl'
 
 export function normalizeAgentMaxToolRounds(value: unknown, fallback: number | undefined = DEFAULT_AGENT_MAX_TOOL_ROUNDS): number {
   const fallbackValue = fallback ?? DEFAULT_AGENT_MAX_TOOL_ROUNDS
@@ -381,6 +381,9 @@ export function createDefaultOpenAIProfile(overrides: Partial<ApiProfile> = {}):
     apiKey: DEFAULT_API_URL_PATCH?.apiKey ?? '',
     model: DEFAULT_API_URL_PATCH?.model ?? (apiMode === 'responses' ? DEFAULT_RESPONSES_MODEL : DEFAULT_IMAGES_MODEL),
     imageGenerationModel: DEFAULT_API_URL_PATCH?.imageGenerationModel ?? DEFAULT_IMAGES_MODEL,
+    imageApiDialect: DEFAULT_API_URL_PATCH?.imageApiDialect ?? 'auto',
+    imageAspectRatio: DEFAULT_API_URL_PATCH?.imageAspectRatio,
+    imageResolution: DEFAULT_API_URL_PATCH?.imageResolution,
     timeout: DEFAULT_API_TIMEOUT,
     reasoningEffort: DEFAULT_API_URL_PATCH?.reasoningEffort,
     codexCli: DEFAULT_API_URL_PATCH?.codexCli ?? false,
@@ -402,6 +405,7 @@ export function createDefaultFalProfile(overrides: Partial<ApiProfile> = {}): Ap
     apiKey: '',
     model: DEFAULT_FAL_MODEL,
     imageGenerationModel: DEFAULT_IMAGES_MODEL,
+    imageApiDialect: 'auto',
     timeout: DEFAULT_API_TIMEOUT,
     apiMode: 'images',
     codexCli: false,
@@ -420,6 +424,9 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
       baseUrl: profile.baseUrl,
       model: profile.model,
       imageGenerationModel: profile.imageGenerationModel,
+      imageApiDialect: profile.imageApiDialect,
+      imageAspectRatio: profile.imageAspectRatio,
+      imageResolution: profile.imageResolution,
       apiMode: profile.apiMode,
       reasoningEffort: profile.reasoningEffort,
       codexCli: profile.codexCli,
@@ -448,6 +455,9 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
       streamPartialImages: savedDraft?.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES,
       transparentBackgroundMethod: savedDraft?.transparentBackgroundMethod ?? 'api',
       providerDrafts,
+      imageApiDialect: savedDraft?.imageApiDialect ?? 'auto',
+      imageAspectRatio: savedDraft?.imageAspectRatio,
+      imageResolution: savedDraft?.imageResolution,
     }
   }
 
@@ -469,6 +479,9 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
       streamPartialImages: savedDraft?.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES,
       transparentBackgroundMethod: supportsNativeTransparentBackground ? savedDraft?.transparentBackgroundMethod ?? 'api' : 'local',
       providerDrafts,
+      imageApiDialect: savedDraft?.imageApiDialect ?? 'auto',
+      imageAspectRatio: savedDraft?.imageAspectRatio,
+      imageResolution: savedDraft?.imageResolution,
     }
   }
 
@@ -495,6 +508,9 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
     streamPartialImages: nextStreamPartialImages,
     transparentBackgroundMethod: savedDraft?.transparentBackgroundMethod ?? 'api',
     providerDrafts,
+    imageApiDialect: savedDraft?.imageApiDialect ?? 'auto',
+    imageAspectRatio: savedDraft?.imageAspectRatio,
+    imageResolution: savedDraft?.imageResolution,
   }
 }
 
@@ -523,6 +539,9 @@ function normalizeProviderDraft(
       : baseUrl,
     model,
     imageGenerationModel,
+    imageApiDialect: normalizeImageApiDialect(input.imageApiDialect),
+    imageAspectRatio: typeof input.imageAspectRatio === 'string' ? input.imageAspectRatio.trim() : undefined,
+    imageResolution: typeof input.imageResolution === 'string' ? input.imageResolution.trim() : undefined,
     apiMode,
     reasoningEffort: normalizeReasoningEffort(input.reasoningEffort),
     codexCli: typeof input.codexCli === 'boolean' ? input.codexCli : fallback.codexCli,
@@ -582,6 +601,9 @@ export function normalizeApiProfile(
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : defaults.apiKey,
     model: (typeof record.model === 'string' && normalizeModelList(record.model)) || defaults.model,
     selectedModel: typeof record.selectedModel === 'string' && record.selectedModel.trim() ? record.selectedModel.trim() : undefined,
+    imageApiDialect: normalizeImageApiDialect(record.imageApiDialect),
+    imageAspectRatio: typeof record.imageAspectRatio === 'string' ? record.imageAspectRatio.trim() : undefined,
+    imageResolution: typeof record.imageResolution === 'string' ? record.imageResolution.trim() : undefined,
     imageGenerationModel: typeof record.imageGenerationModel === 'string'
       ? record.imageGenerationModel.trim()
       : '',
@@ -898,22 +920,6 @@ export function importCustomProviderDefinitionFromJson(jsonText: string, existin
   return result.customProviders[0]
 }
 
-/** 拆分模型列表，兼容中英文逗号并去重 */
-export function splitModelList(value: string) {
-  return Array.from(new Set(value.split(/[,，]/).map((item) => item.trim()).filter(Boolean)))
-}
-
-export function normalizeModelList(value: string) {
-  return splitModelList(value).join(', ')
-}
-
-/** 将模型列表解析为实际请求使用的单个模型，优先使用 preferred，其次是首页选中的模型 */
-export function resolveApiProfileModel(profile: ApiProfile, preferred?: string): ApiProfile {
-  const models = splitModelList(profile.model)
-  const model = [preferred, profile.selectedModel].find((item) => item && models.includes(item)) ?? models[0] ?? profile.model
-  return { ...profile, model }
-}
-
 export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
   const record = settings && typeof settings === 'object' ? settings as Record<string, unknown> : {}
   const normalized = normalizeSettings(settings)
@@ -1006,6 +1012,9 @@ function getApiProfileDedupKey(profile: ApiProfile): string {
     profile.imageGenerationModel?.trim(),
     profile.apiMode,
     profile.reasoningEffort,
+    profile.imageApiDialect ?? 'auto',
+    profile.imageAspectRatio,
+    profile.imageResolution,
   ])
 }
 
@@ -1017,6 +1026,9 @@ function getApiProfileConnectionKey(profile: ApiProfile): string {
     profile.imageGenerationModel?.trim(),
     profile.apiMode,
     profile.reasoningEffort,
+    profile.imageApiDialect ?? 'auto',
+    profile.imageAspectRatio,
+    profile.imageResolution,
   ])
 }
 
@@ -1145,6 +1157,9 @@ const PRESET_PROFILE_DEPLOYMENT_KEYS = [
   'baseUrl',
   'model',
   'imageGenerationModel',
+  'imageApiDialect',
+  'imageAspectRatio',
+  'imageResolution',
   'timeout',
   'apiMode',
   'reasoningEffort',

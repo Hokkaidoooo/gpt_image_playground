@@ -855,6 +855,11 @@ export default function DetailModal() {
           </button>
 
           <div data-selectable-text className="flex-1">
+            {task.localSaveError && (
+              <p role="alert" className="mb-4 rounded-xl bg-amber-500/[0.08] p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+                本机保存未完成，可在这里下载图片。{task.localSaveError}
+              </p>
+            )}
             <div className="flex items-center gap-1.5 mb-2">
               <h3 className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
                 输入内容

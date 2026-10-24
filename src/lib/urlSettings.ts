@@ -1,5 +1,5 @@
 import type { ApiMode, ApiProfile, AppSettings } from '../types'
-import { normalizeBaseUrl } from './devProxy'
+import { normalizeImageProviderBaseUrl } from './imageProviderUrl'
 import {
   createDefaultOpenAIProfile,
   DEFAULT_IMAGES_MODEL,
@@ -10,10 +10,11 @@ import {
   normalizeSettings,
   normalizeReasoningEffort,
   normalizeStreamPartialImages,
+  normalizeImageApiDialect,
 } from './apiProfiles'
 import { isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile } from './presetConfig'
 
-const URL_SETTING_KEYS = ['settings', 'profileId', 'apiUrl', 'apiKey', 'codexCli', 'apiMode', 'model', 'imageGenerationModel', 'profileName', 'reasoningEffort', 'streamImages', 'streamPartialImages', 'transparentBackgroundMethod']
+const URL_SETTING_KEYS = ['settings', 'profileId', 'apiUrl', 'apiKey', 'codexCli', 'apiMode', 'model', 'imageGenerationModel', 'imageApiDialect', 'imageAspectRatio', 'imageResolution', 'profileName', 'reasoningEffort', 'streamImages', 'streamPartialImages', 'transparentBackgroundMethod']
 
 function getProfileDedupKey(profile: ApiProfile) {
   return JSON.stringify([
@@ -29,6 +30,9 @@ function getProfileDedupKey(profile: ApiProfile) {
     profile.streamImages === true,
     profile.streamPartialImages ?? 0,
     profile.transparentBackgroundMethod,
+    profile.imageApiDialect ?? 'auto',
+    profile.imageAspectRatio,
+    profile.imageResolution,
   ])
 }
 
@@ -39,6 +43,17 @@ function createUrlProfileId(usedIds: Set<string>) {
   }
   usedIds.add(id)
   return id
+}
+
+function imageSettingsFromParams(params: URLSearchParams): Partial<ApiProfile> {
+  const dialect = params.get('imageApiDialect')
+  const ratio = params.get('imageAspectRatio')
+  const resolution = params.get('imageResolution')
+  return {
+    ...(dialect !== null ? { imageApiDialect: normalizeImageApiDialect(dialect) } : {}),
+    ...(ratio !== null ? { imageAspectRatio: ratio.trim() } : {}),
+    ...(resolution !== null ? { imageResolution: resolution.trim() } : {}),
+  }
 }
 
 function pickUrlSettingsPayload(value: unknown): unknown | null {
@@ -174,6 +189,9 @@ function buildPresetConfigOnlySettingsFromUrlParams(currentSettings: Partial<App
           if (typeof matched.baseUrl === 'string') patch.baseUrl = matched.baseUrl
           if (typeof matched.model === 'string' && matched.model.trim()) patch.model = matched.model.trim()
           if (typeof matched.imageGenerationModel === 'string') patch.imageGenerationModel = matched.imageGenerationModel.trim()
+          if (matched.imageApiDialect !== undefined) patch.imageApiDialect = normalizeImageApiDialect(matched.imageApiDialect)
+          if (typeof matched.imageAspectRatio === 'string') patch.imageAspectRatio = matched.imageAspectRatio.trim()
+          if (typeof matched.imageResolution === 'string') patch.imageResolution = matched.imageResolution.trim()
           if (typeof matched.timeout === 'number' && Number.isFinite(matched.timeout)) patch.timeout = matched.timeout
           if (typeof matched.apiProxy === 'boolean') patch.apiProxy = matched.apiProxy
           if (matched.responseFormatB64Json === true) patch.responseFormatB64Json = true
@@ -201,8 +219,9 @@ function buildPresetConfigOnlySettingsFromUrlParams(currentSettings: Partial<App
   const transparentBackgroundMethodParam = searchParams.get('transparentBackgroundMethod')
   if (apiKeyParam !== null) patch.apiKey = apiKeyParam.trim()
   if (!apiKeyOnly) {
+    Object.assign(patch, imageSettingsFromParams(searchParams))
     if (profileNameParam?.trim()) patch.name = profileNameParam.trim()
-    if (apiUrlParam !== null) patch.baseUrl = normalizeBaseUrl(apiUrlParam.trim())
+    if (apiUrlParam !== null) patch.baseUrl = normalizeImageProviderBaseUrl(apiUrlParam, patch.imageApiDialect ?? targetProfile.imageApiDialect)
     if (modelParam?.trim()) patch.model = modelParam.trim()
     if (imageGenerationModelParam !== null) patch.imageGenerationModel = imageGenerationModelParam.trim()
     if (transparentBackgroundMethodParam === 'api' || transparentBackgroundMethodParam === 'local') {
@@ -263,7 +282,8 @@ function buildRegularSettingsFromUrlParams(currentSettings: Partial<AppSettings>
     : undefined
   const apiMode: ApiMode | undefined = apiModeParam === 'images' || apiModeParam === 'responses' ? apiModeParam : undefined
 
-  const hasLegacyOpenAIParams = apiUrlParam !== null || apiKeyParam !== null || codexCliParam !== null || apiMode !== undefined || modelParam !== null || imageGenerationModelParam !== null || profileNameParam !== null || reasoningEffortParam !== null || streamImagesParam !== null || streamPartialImagesParam !== null
+  const imageParams = imageSettingsFromParams(searchParams)
+  const hasLegacyOpenAIParams = apiUrlParam !== null || apiKeyParam !== null || codexCliParam !== null || apiMode !== undefined || modelParam !== null || imageGenerationModelParam !== null || profileNameParam !== null || reasoningEffortParam !== null || streamImagesParam !== null || streamPartialImagesParam !== null || Object.keys(imageParams).length > 0
   const settings = importedSettings == null
     ? normalizeSettings(currentSettings)
     : activateFirstImportedProfile(mergeImportedSettings(currentSettings, importedSettings), importedSettings)
@@ -299,7 +319,8 @@ function buildRegularSettingsFromUrlParams(currentSettings: Partial<AppSettings>
       : undefined
     if (existingById) {
       const patch: Partial<typeof existingById> = {}
-      if (apiUrlParam !== null) patch.baseUrl = normalizeBaseUrl(apiUrlParam.trim())
+      Object.assign(patch, imageParams)
+      if (apiUrlParam !== null) patch.baseUrl = normalizeImageProviderBaseUrl(apiUrlParam, patch.imageApiDialect ?? existingById.imageApiDialect)
       if (apiKeyParam !== null) patch.apiKey = apiKeyParam.trim()
       if (apiMode !== undefined) patch.apiMode = apiMode
       if (modelParam?.trim()) patch.model = modelParam.trim()
@@ -324,8 +345,9 @@ function buildRegularSettingsFromUrlParams(currentSettings: Partial<AppSettings>
       name: 'URL 参数配置',
       apiMode: profileApiMode,
       model: modelParam?.trim() || (profileApiMode === 'responses' ? DEFAULT_RESPONSES_MODEL : DEFAULT_IMAGES_MODEL),
+      ...imageParams,
     })
-    if (apiUrlParam !== null) profile.baseUrl = normalizeBaseUrl(apiUrlParam.trim())
+    if (apiUrlParam !== null) profile.baseUrl = normalizeImageProviderBaseUrl(apiUrlParam, profile.imageApiDialect)
     if (apiKeyParam !== null) profile.apiKey = apiKeyParam.trim()
     if (imageGenerationModelParam !== null) profile.imageGenerationModel = imageGenerationModelParam.trim()
     if (reasoningEffortParam !== null) profile.reasoningEffort = normalizeReasoningEffort(reasoningEffortParam)

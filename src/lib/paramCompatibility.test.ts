@@ -131,4 +131,30 @@ describe('parameter compatibility', () => {
 
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'max' }, settings).quality).toBe('high')
   })
+
+  it.each([
+    ['grok-imagine-image', 10],
+    ['gemini-3.1-flash-image', 1],
+    ['gemini-nano-banana-2.1', 1],
+    ['imagen-4.0-generate-001', 4],
+  ])('uses the native output limit of %s', (model, limit) => {
+    const profile = createDefaultOpenAIProfile({ model })
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id })
+    expect(getOutputImageLimitForSettings(settings)).toBe(limit)
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, n: 12 }, settings).n).toBe(limit)
+  })
+
+  it('makes a native protocol change remove the visible GPT parameter selections', () => {
+    const profile = createDefaultOpenAIProfile({ model: 'gemini-nano-banana-2.1', codexCli: true })
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id })
+    const params = { ...DEFAULT_PARAMS, size: '3072x3072', quality: 'high' as const, moderation: 'low' as const, output_format: 'jpeg' as const, output_compression: 70, transparent_output: true, n: 4 }
+    expect(normalizeParamsForSettings(params, settings)).toEqual(DEFAULT_PARAMS)
+    expect(params.size).toBe('3072x3072')
+  })
+
+  it('keeps OpenAI options for a Gemini model explicitly wrapped as Images', () => {
+    const profile = createDefaultOpenAIProfile({ model: 'gemini-nano-banana-2.1', imageApiDialect: 'openai' })
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id })
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '1024x1536', quality: 'high', n: 3 }, settings)).toMatchObject({ size: '1024x1536', quality: 'high', n: 3 })
+  })
 })

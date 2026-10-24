@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
 import { createDefaultFalProfile, DEFAULT_FAL_BASE_URL, DEFAULT_SETTINGS } from './apiProfiles'
 import { callFalAiImageApi } from './falAiImageApi'
-import { apiFetch } from './platform'
+import * as platform from './platform'
 
 vi.mock('@fal-ai/client', () => ({
   fal: {
@@ -24,6 +24,7 @@ const falMock = fal as unknown as {
 describe('callFalAiImageApi', () => {
   afterEach(() => {
     vi.clearAllMocks()
+    vi.restoreAllMocks()
   })
 
   it('uses the default fal endpoint without proxyUrl', async () => {
@@ -42,7 +43,8 @@ describe('callFalAiImageApi', () => {
     expect(falMock.config).toHaveBeenCalledWith({
       credentials: 'fal-key',
       suppressLocalCredentialsWarning: true,
-      fetch: apiFetch,
+      retry: { maxRetries: 0 },
+      fetch: expect.any(Function),
     })
   })
 
@@ -65,9 +67,21 @@ describe('callFalAiImageApi', () => {
     expect(falMock.config).toHaveBeenCalledWith({
       credentials: 'fal-key',
       suppressLocalCredentialsWarning: true,
-      fetch: apiFetch,
+      retry: { maxRetries: 0 },
+      fetch: expect.any(Function),
       proxyUrl: 'https://fal-proxy.example.com/api/fal',
     })
+  })
+
+  it('passes the selected profile timeout through the SDK fetch without resubmitting generation', async () => {
+    falMock.subscribe.mockResolvedValue({ requestId: 'req-timeout', data: { images: [{ b64_json: 'aW1hZ2U=' }] } })
+    const apiFetch = vi.spyOn(platform, 'apiFetch').mockResolvedValue(new Response('{}'))
+    await callFalAiImageApi({ settings: DEFAULT_SETTINGS, prompt: 'prompt', params: { ...DEFAULT_PARAMS }, inputImageDataUrls: [] }, createDefaultFalProfile({ apiKey: 'fal-key', timeout: 1800 }))
+    const sdkFetch = falMock.config.mock.calls[0][0].fetch as typeof fetch
+    const response = await sdkFetch('https://fal.example.test/result', { method: 'GET', headers: { 'X-Test': 'fixture' } })
+    expect(await response.json()).toEqual({})
+    expect(apiFetch).toHaveBeenCalledExactlyOnceWith('https://fal.example.test/result', { method: 'GET', headers: { 'X-Test': 'fixture' }, timeoutSeconds: 1800 })
+    expect(falMock.subscribe).toHaveBeenCalledTimes(1)
   })
 
   it('uses the GPT Image 2.5 text-to-image endpoint and preserves max quality', async () => {

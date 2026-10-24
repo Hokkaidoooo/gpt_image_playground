@@ -1,13 +1,14 @@
 import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { deleteFavoriteCollection, useStore, submitTask, submitAgentMessage, stopAgentResponse, stopBatchPrompts, addImageFromFile, removeMultipleTasks, taskMatchesFilterStatus, taskMatchesSearchQuery } from '../store'
-import { DEFAULT_PARAMS, MAX_INPUT_IMAGES, type TaskRecord } from '../types'
+import { DEFAULT_PARAMS, type ApiProfile, type TaskRecord } from '../types'
 import { getActiveAgentRounds } from '../lib/agentConversationState'
 import { getActiveApiProfile, getAgentImageApiProfile, normalizeSettings, resolveApiProfileModel, splitModelList } from '../lib/apiProfiles'
 import { getImageGenerationModel, isGptImage25Model } from '../lib/imageModels'
+import { getImageProviderCapabilities } from '../lib/imageProvider'
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
 import { splitBatchPrompts } from '../lib/batchPrompts'
-import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
+import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, normalizeParamsForSettings } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageComments, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
 import { normalizeCodexCliImageSize, normalizeImageSize } from '../lib/size'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
@@ -441,7 +442,10 @@ export default function InputBar() {
       : undefined
     return reusedProfile ? resolveApiProfileModel(reusedProfile, reusedTaskApiModel ?? undefined) : currentActiveProfile
   }, [appMode, currentActiveProfile, reusedTaskApiModel, reusedTaskApiProfileId, settings])
-  const isTemporarilyReusedProfile = activeProfile.id !== currentActiveProfile.id
+  const imageCapabilities = useMemo(() => getImageProviderCapabilities(activeProfile), [activeProfile])
+  const inputImageLimit = imageCapabilities.maxInputImages
+  const nativeParameters = imageCapabilities.nativeParameters
+  const isTemporarilyReusedProfile = appMode !== 'agent' && settings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId === activeProfile.id
   const modelOptions = useMemo(() => (
     splitModelList(settings.profiles.find((profile) => profile.id === activeProfile.id)?.model ?? activeProfile.model)
       .map((model) => ({ label: model, value: model }))
@@ -456,19 +460,35 @@ export default function InputBar() {
       profiles: settings.profiles.map((profile) => profile.id === activeProfile.id ? { ...profile, selectedModel: model } : profile),
     })
   }, [activeProfile.id, isTemporarilyReusedProfile, setReusedTaskApiModel, setSettings, settings.profiles])
+  const handleProfileChange = useCallback((patch: Partial<ApiProfile>) => {
+    setSettings({
+      profiles: useStore.getState().settings.profiles.map((profile) => profile.id === activeProfile.id ? { ...profile, ...patch } : profile),
+    })
+  }, [activeProfile.id, setSettings])
   const activeAgentConversation = appMode === 'agent'
     ? agentConversations.find((conversation) => conversation.id === activeAgentConversationId) ?? null
     : null
   const activeAgentIsRunning = Boolean(activeAgentConversation?.rounds.some((round) => round.status === 'running'))
   const effectiveSettings = useMemo(() => (
-    activeProfile.id === settingsActiveProfile.id
+    activeProfile.id === settingsActiveProfile.id && activeProfile.model === settingsActiveProfile.model
       ? settings
-      : normalizeSettings({ ...settings, activeProfileId: activeProfile.id })
-  ), [activeProfile.id, settingsActiveProfile.id, settings])
+      : normalizeSettings({
+          ...settings,
+          activeProfileId: activeProfile.id,
+          profiles: settings.profiles.map((profile) => profile.id === activeProfile.id ? { ...profile, selectedModel: activeProfile.model } : profile),
+        })
+  ), [activeProfile.id, activeProfile.model, settingsActiveProfile.id, settingsActiveProfile.model, settings])
   const hasSubmitApiConfig = Boolean(activeProfile.apiKey)
   // 批量进行中暂停画廊和 Agent 的提交，需等待完成或停止后再提交
   const batchRunning = Boolean(batchProgress)
-  const canSubmit = Boolean(prompt.trim() && hasSubmitApiConfig && !activeAgentIsRunning && !batchRunning)
+  const unsupportedImageInput = nativeParameters && maskDraft
+    ? '当前图片接口不支持遮罩编辑，请移除遮罩或切换图片接口。'
+    : inputImages.length > inputImageLimit
+    ? inputImageLimit === 0
+      ? '当前图片接口只支持文生图，请移除参考图或切换图片接口。'
+      : `当前图片接口最多支持 ${inputImageLimit} 张参考图，请移除多余图片后再生成。`
+    : ''
+  const canSubmit = Boolean(prompt.trim() && hasSubmitApiConfig && !unsupportedImageInput && !activeAgentIsRunning && !batchRunning)
   const batchEnabled = appMode === 'gallery' && settings.showBatchPrompt && settings.batchPromptEnabled
   // 批量进行中始终在画廊显示入口，以便查看进度和停止
   const showBatch = appMode === 'gallery' && (settings.showBatchPrompt || batchRunning)
@@ -482,6 +502,8 @@ export default function InputBar() {
     ? '停止生成'
     : !hasSubmitApiConfig
     ? '尚未完成 API 配置，请在右上角设置中进行'
+    : unsupportedImageInput
+    ? unsupportedImageInput
     : appMode === 'agent'
     ? '画廊批量任务进行中，请等待完成或回到画廊停止后再提交'
     : '批量任务进行中，请等待完成或停止后再提交'
@@ -489,12 +511,16 @@ export default function InputBar() {
     ? '每条提示词之间空两行分隔，可输入 @ 来指定参考图...'
     : '描述你想生成的图片，可输入 @ 来指定参考图...'
   const submitCurrentMode = useCallback(() => {
+    if (unsupportedImageInput) {
+      showToast(unsupportedImageInput, 'error')
+      return
+    }
     if (appMode === 'agent') {
       void submitAgentMessage()
     } else {
       void submitTask()
     }
-  }, [appMode])
+  }, [appMode, showToast, unsupportedImageInput])
   const stopActiveAgentResponse = useCallback(() => {
     stopAgentResponse(activeAgentConversationId)
   }, [activeAgentConversationId])
@@ -510,21 +536,21 @@ export default function InputBar() {
   const activeProvider = activeProfile.provider
   const isFalProvider = activeProvider === 'fal'
   const agentAutoImageCount = appMode === 'agent'
-  const moderationDisabled = isFalProvider
-  const transparentOutputAvailable = appMode === 'gallery'
+  const moderationDisabled = isFalProvider || nativeParameters
+  const transparentOutputAvailable = appMode === 'gallery' && !nativeParameters
   const showTransparentOutputControl = transparentOutputAvailable && (params.output_format === 'png' || params.output_format === 'webp')
   const transparentOutputEnabled = transparentOutputAvailable && showTransparentOutputControl && params.transparent_output
-  const compressionDisabled = params.output_format === 'png' || isFalProvider
-  const outputImageLimit = getOutputImageLimitForSettings(effectiveSettings)
+  const compressionDisabled = params.output_format === 'png' || isFalProvider || nativeParameters
+  const outputImageLimit = imageCapabilities.maxOutputImages
   const isFalTextToImage = isFalProvider && inputImages.length === 0
   const nDraftValue = Number(nInput)
   const effectiveNValue = Number.isNaN(nDraftValue) ? params.n : nDraftValue
-  const streamConcurrentByN = activeProfile.provider === 'openai' && activeProfile.streamImages === true && !agentAutoImageCount && effectiveNValue > 1
+  const streamConcurrentByN = activeProfile.provider === 'openai' && !nativeParameters && activeProfile.streamImages === true && !agentAutoImageCount && effectiveNValue > 1
   const nLimitHintText = agentAutoImageCount
     ? 'Agent 模式下数量由模型根据提示词自动决定'
     : isFalProvider
     ? `fal.ai 最大请求数量为 ${outputImageLimit}`
-    : `OpenAI 最大请求数量为 ${outputImageLimit}`
+    : `当前图片接口每次最多请求 ${outputImageLimit} 张`
   const displaySize = isFalTextToImage && params.size === 'auto'
     ? DEFAULT_FAL_IMAGE_SIZE
     : (activeProfile.codexCli ? normalizeCodexCliImageSize(params.size) : normalizeImageSize(params.size)) || DEFAULT_PARAMS.size
@@ -541,8 +567,8 @@ export default function InputBar() {
         ]
       : []),
   ]
-  const atImageLimit = inputImages.length >= MAX_INPUT_IMAGES
-  const uploadImageTooltipText = atImageLimit ? `参考图数量已达上限（${MAX_INPUT_IMAGES} 张），无法继续添加` : '添加图片'
+  const atImageLimit = inputImages.length >= inputImageLimit
+  const uploadImageTooltipText = inputImageLimit === 0 ? '当前图片接口只支持文生图' : atImageLimit ? `参考图数量已达上限（${inputImageLimit} 张），无法继续添加` : '添加图片'
   const transparentOutputHint = useHintTooltip()
   const handleTransparentOutputMenuOpenChange = useCallback((open: boolean) => {
     if (open) transparentOutputHint.hide()
@@ -847,15 +873,15 @@ export default function InputBar() {
   const handleFiles = async (files: FileList | File[]) => {
     try {
       const currentCount = useStore.getState().inputImages.length
-      if (currentCount >= MAX_INPUT_IMAGES) {
+      if (currentCount >= inputImageLimit) {
         useStore.getState().showToast(
-          `参考图数量已达上限（${MAX_INPUT_IMAGES} 张），无法继续添加`,
+          inputImageLimit === 0 ? '当前图片接口只支持文生图' : `参考图数量已达上限（${inputImageLimit} 张），无法继续添加`,
           'error',
         )
         return
       }
 
-      const remaining = MAX_INPUT_IMAGES - currentCount
+      const remaining = inputImageLimit - currentCount
       const accepted = Array.from(files).filter((f) => f.type.startsWith('image/'))
       const toAdd = accepted.slice(0, remaining)
       const discarded = accepted.length - toAdd.length
@@ -866,7 +892,7 @@ export default function InputBar() {
 
       if (discarded > 0) {
         useStore.getState().showToast(
-          `已达上限 ${MAX_INPUT_IMAGES} 张，${discarded} 张图片被丢弃`,
+          `已达上限 ${inputImageLimit} 张，${discarded} 张图片未添加`,
           'error',
         )
       }
@@ -1675,6 +1701,7 @@ export default function InputBar() {
       activeProfile={activeProfile}
       modelOptions={modelOptions}
       onModelChange={handleModelChange}
+      onProfileChange={handleProfileChange}
       isFalProvider={isFalProvider}
       isFalTextToImage={isFalTextToImage}
       displaySize={displaySize}
@@ -1727,9 +1754,9 @@ export default function InputBar() {
 
   return (
     <>
-      <DragUploadOverlay visible={isDragging} atImageLimit={atImageLimit} maxImages={MAX_INPUT_IMAGES} />
+      <DragUploadOverlay visible={isDragging} atImageLimit={atImageLimit} maxImages={inputImageLimit} />
 
-      {showSizePicker && (
+      {showSizePicker && !nativeParameters && (
         <SizePickerModal
           currentSize={isFalTextToImage && params.size === 'auto' ? DEFAULT_FAL_IMAGE_SIZE : params.size}
           onSelect={(size) => setParams({ size })}
@@ -1937,6 +1964,7 @@ export default function InputBar() {
 
           {/* 参数 + 按钮 */}
           <div className="mt-3">
+            {unsupportedImageInput && <p role="alert" className="mb-2 rounded-xl bg-amber-500/[0.1] px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">{unsupportedImageInput}</p>}
             {/* 桌面端布局 */}
             <div className="hidden sm:flex items-center justify-between gap-3">
               {renderParams()}
@@ -1948,7 +1976,7 @@ export default function InputBar() {
                   onMouseEnter={() => setSubmitHover(true)}
                   onMouseLeave={() => setSubmitHover(false)}
                 >
-                  <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig || batchRunning) && submitHover} text={submitTooltipText} />
+                  <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig || batchRunning || Boolean(unsupportedImageInput)) && submitHover} text={submitTooltipText} />
                   <button
                     onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
                     disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
@@ -1991,7 +2019,7 @@ export default function InputBar() {
                   onMouseEnter={() => setSubmitHover(true)}
                   onMouseLeave={() => setSubmitHover(false)}
                 >
-                  <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig || batchRunning) && submitHover} text={submitTooltipText} />
+                  <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig || batchRunning || Boolean(unsupportedImageInput)) && submitHover} text={submitTooltipText} />
                   <button
                     onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
                     disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}

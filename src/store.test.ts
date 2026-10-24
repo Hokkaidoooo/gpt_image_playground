@@ -5890,3 +5890,81 @@ describe('client connection errors', () => {
     else expect(error).toBe(reason)
   })
 })
+
+describe('local image archive result integrity', () => {
+  const image = 'data:image/png;base64,1024x1024-offline-fixture'
+  const imageResult = { images: [image], actualParams: { size: '1024x1024' }, actualParamsList: [{ size: '1024x1024' }], revisedPrompts: [] }
+  const profile = createDefaultOpenAIProfile({ id: 'archive-provider', name: '原供应商', baseUrl: 'https://archive.example.test/v1', apiKey: 'test-only-vendor-key', model: 'first-image, selected-image', selectedModel: 'selected-image', imageApiDialect: 'openai' })
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    vi.mocked(callImageApi).mockReset().mockResolvedValue(imageResult)
+    vi.stubGlobal('window', { location: new URL('http://127.0.0.1:17865/'), __LOCAL_IMAGE_BOOTSTRAP__: { preset: 'offline-fixture', token: 'test-only-local-session', bridgeVersion: 2 } })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id }),
+      tasks: [], prompt: '本次提示词', params: { ...DEFAULT_PARAMS }, inputImages: [], maskDraft: null,
+      reusedTaskApiProfileId: null, reusedTaskApiProfileMissing: false, reusedTaskApiModel: null, showToast: vi.fn(),
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it.each(['disk', 'connection'])('keeps downloadable output and a persistent error after %s archive failure', async (failure) => {
+    const fetch = failure === 'disk'
+      ? vi.fn().mockResolvedValue(new Response('{"error":{"code":"local_save_failed","message":"磁盘写入失败"}}', { status: 507 }))
+      : vi.fn().mockRejectedValue(new TypeError('本机连接中断'))
+    vi.stubGlobal('fetch', fetch)
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+    const saved = useStore.getState().tasks[0]
+    expect(saved.outputImages).toHaveLength(1)
+    expect(saved.localSaveError).toContain('图片已经生成，但本地保存失败')
+    await expect((await import('./lib/db')).getImage(saved.outputImages[0])).resolves.toMatchObject({ dataUrl: image })
+    expect(callImageApi).toHaveBeenCalledTimes(1)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(console.error).toHaveBeenCalled()
+    expect(useStore.getState().showToast).toHaveBeenLastCalledWith(saved.localSaveError, 'error')
+    await expect((await import('./lib/db')).getAllTasks()).resolves.toEqual([saved])
+  })
+
+  it('fails damaged images without creating a successful output or automatically regenerating', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('{"error":{"code":"invalid_image","message":"图片内容损坏"}}', { status: 502 }))
+    vi.stubGlobal('fetch', fetch)
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+    const saved = useStore.getState().tasks[0]
+    expect(saved.outputImages).toEqual([])
+    expect(saved.localSaveError).toBeUndefined()
+    expect(saved.error).toContain('图片内容损坏')
+    await expect((await import('./lib/db')).getAllImages()).resolves.toEqual([])
+    expect(callImageApi).toHaveBeenCalledTimes(1)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('archives the submitted supplier and selected model even when the user switches supplier during generation', async () => {
+    const pending = deferred<typeof imageResult>()
+    vi.mocked(callImageApi).mockImplementationOnce(() => pending.promise)
+    const fetch = vi.fn().mockResolvedValue(new Response('{"saved":true}'))
+    vi.stubGlobal('fetch', fetch)
+    await submitTask()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(1))
+    const other = createDefaultOpenAIProfile({ id: 'other-provider', baseUrl: 'https://other.example.test/v1', apiKey: 'other-test-key', model: 'other-image' })
+    useStore.getState().setSettings({ profiles: [other], activeProfileId: other.id })
+    pending.resolve(imageResult)
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+    const payload = JSON.parse(fetch.mock.calls[0][1].body)
+    expect(payload.endpoint).toBe(profile.baseUrl)
+    expect(payload.request.model).toBe('selected-image')
+    expect(payload.request.profile_name).toBe(profile.name)
+    expect(payload.request.prompt).toBe('本次提示词')
+    expect(JSON.stringify(payload)).not.toContain(profile.apiKey)
+    expect(JSON.stringify(payload)).not.toContain(other.apiKey)
+    expect(useStore.getState().tasks[0].localSaveError).toBeUndefined()
+    expect(callImageApi).toHaveBeenCalledTimes(1)
+  })
+})

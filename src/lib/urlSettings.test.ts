@@ -7,6 +7,7 @@ import {
   normalizeSettings,
 } from './apiProfiles'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, getExplicitUrlSettingsIds, hasUrlSettingParams } from './urlSettings'
+import { buildImageProviderUrl } from './imageProviderUrl'
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -32,6 +33,17 @@ async function importPresetConfigOnlyUrlSettings(options: { locked?: boolean, mu
 }
 
 describe('URL settings params', () => {
+  it.each(['gemini-interactions', 'auto'] as const)('分享和导入保留图片接口 %s 及版本路径', (dialect) => {
+    const current = normalizeSettings({ profiles: [createDefaultOpenAIProfile({ id: 'saved' })] })
+    const params = new URLSearchParams({ profileId: 'saved', apiUrl: 'https://google.example.test/v1beta', imageApiDialect: dialect, imageAspectRatio: '16:9', imageResolution: '2K', model: 'gemini-nano-banana-2.1' })
+    const next = normalizeSettings(buildSettingsFromUrlParams(current, params))
+    expect(next.profiles[0]).toMatchObject({ baseUrl: 'https://google.example.test/v1beta', imageApiDialect: dialect, imageAspectRatio: '16:9', imageResolution: '2K' })
+    expect(buildImageProviderUrl(next.profiles[0], 'interactions', 'gemini-interactions')).toBe('https://google.example.test/v1beta/interactions')
+    expect(hasUrlSettingParams(params)).toBe(true)
+    clearUrlSettingParams(params)
+    expect(params.toString()).toBe('')
+  })
+
   it('preserves an existing model when apiMode changes', () => {
     const current = normalizeSettings({ profiles: [createDefaultOpenAIProfile({ id: 'saved', model: 'vendor/model', imageGenerationModel: '' })] })
     const switched = normalizeSettings(buildSettingsFromUrlParams(current, new URLSearchParams('profileId=saved&apiMode=responses')))
@@ -81,10 +93,12 @@ describe('URL settings params', () => {
     })
 
     expect(second.profiles.filter((profile) => profile.id === 'shared-openai')).toHaveLength(1)
-    expect(second.profiles.find((profile) => profile.id === 'shared-openai')).toMatchObject({
-      baseUrl: 'https://api.example.com/v2/v1',
+    const shared = second.profiles.find((profile) => profile.id === 'shared-openai')
+    expect(shared).toMatchObject({
+      baseUrl: 'https://api.example.com/v2',
       model: 'model-v2',
     })
+    expect(buildImageProviderUrl(shared!, 'images/generations', 'openai')).toBe('https://api.example.com/v2/v1/images/generations')
   })
 
   it('preserves fields omitted from a same-ID OpenAI share URL', () => {

@@ -555,6 +555,11 @@ export default function TaskCard({
               </p>
             )}
           </div>
+          {task.localSaveError && (
+            <p role="alert" className="mb-2 line-clamp-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400" title={task.localSaveError}>
+              本机保存未完成，可下载图库图片。{task.localSaveError}
+            </p>
+          )}
           <div className="mt-auto flex flex-col gap-1.5">
             {/* 参数与信息：横向滚动 */}
             <div 

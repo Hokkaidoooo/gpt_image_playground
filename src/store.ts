@@ -79,6 +79,7 @@ import { pickSaveDir, saveFile, saveFileToDir, type SaveOptions } from './lib/sa
 import { endDataProgress, setDataProgressCancelable, startDataProgress, updateDataProgress } from './lib/dataProgress'
 import { throwIfAborted } from './lib/serverSentEvents'
 import { tauriStorage } from './lib/tauriStorage'
+import { hasLocalImageBridge, LocalImageSaveError, localImageRecord, saveLocalGeneratedImages } from './lib/localRuntime'
 
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
@@ -1453,7 +1454,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.falRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, localSaveError } = await storeTaskOutputImages(task, result.images)
   const actualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList, outputImageSizes)
   const latestBeforeUpdate = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latestBeforeUpdate || latestBeforeUpdate.status === 'done' || latestBeforeUpdate.error === AGENT_STOPPED_MESSAGE || (latestBeforeUpdate.status !== 'running' && !latestBeforeUpdate.falRecoverable)) {
@@ -1463,6 +1464,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
 
   updateTaskInStore(task.id, {
     outputImages: outputIds,
+    localSaveError,
     transparentOriginalImages: transparentOriginalImageIds,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
@@ -1470,7 +1472,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     ...createTaskDonePatch(task, Date.now()),
     falRecoverable: false,
   })
-  useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+  useStore.getState().showToast(localSaveError || `fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, localSaveError ? 'error' : 'success')
   if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `fal.ai 任务已恢复，共 ${outputIds.length} 张图片。`)
   else void continueRecoveredAgentRound(task.id)
 }
@@ -1820,6 +1822,10 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       apiProfileName: activeProfile.name,
       apiMode: activeProfile.apiMode,
       apiModel: activeProfile.model,
+      apiBaseUrl: activeProfile.baseUrl,
+      imageApiDialect: activeProfile.imageApiDialect,
+      imageAspectRatio: activeProfile.imageAspectRatio,
+      imageResolution: activeProfile.imageResolution,
       inputImageIds: orderedInputImages.map((i) => i.id),
       maskTargetImageId,
       maskImageId,
@@ -2176,6 +2182,21 @@ function addTaskReferencedImageIds(target: Set<string>, task: TaskRecord) {
   for (const id of task.streamPartialImageIds || []) target.add(id)
 }
 
+async function saveTaskGeneratedImages(task: TaskRecord, images: string[]) {
+  if (!hasLocalImageBridge() || images.length === 0) return
+  const profile = useStore.getState().settings.profiles.find((item) => item.id === task.apiProfileId)
+  const endpoint = task.apiBaseUrl || profile?.baseUrl
+  try {
+    if (!endpoint) throw new LocalImageSaveError('原供应商配置已删除，无法确定保存记录的接口地址')
+    await saveLocalGeneratedImages(images, localImageRecord(task, profile), endpoint)
+  } catch (err) {
+    // 文件归档失败不能撤销已生成图片；损坏图片仍明确失败，不能进入成功图库。
+    if (!(err instanceof LocalImageSaveError) || err.invalidImages) throw err
+    console.error('生成图片的本机归档失败，已保留浏览器结果', err)
+    return err.message
+  }
+}
+
 async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
   const outputIds: string[] = []
   const outputDataUrls: string[] = []
@@ -2214,10 +2235,12 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
       outputImageSizes.push(stored)
     }
 
+    const localSaveError = await saveTaskGeneratedImages(task, outputDataUrls)
     return {
       outputIds,
       outputDataUrls,
       outputImageSizes,
+      localSaveError,
       transparentOriginalImageIds: transparentOriginalImageIds.length ? transparentOriginalImageIds : undefined,
     }
   } catch (err) {
@@ -2820,6 +2843,10 @@ async function executeAgentRound(
         apiProfileName: imageProfile.name,
         apiMode: imageProfile.apiMode,
         apiModel: imageProfile.model,
+        apiBaseUrl: imageProfile.baseUrl,
+        imageApiDialect: imageProfile.imageApiDialect,
+        imageAspectRatio: imageProfile.imageAspectRatio,
+        imageResolution: imageProfile.imageResolution,
         inputImageIds,
         maskTargetImageId: options.maskTargetImageId !== undefined ? options.maskTargetImageId : round.maskTargetImageId ?? null,
         maskImageId: options.maskImageId !== undefined ? options.maskImageId : round.maskImageId ?? null,
@@ -2851,9 +2878,11 @@ async function executeAgentRound(
       const taskId = await ensureStreamingAgentTask(toolCallId)
       const latestTask = useStore.getState().tasks.find((task) => task.id === taskId)
       if (latestTask?.status === 'done' && latestTask.outputImages.length > 0) return { taskId, committed: true }
+      if (!latestTask) return { taskId, committed: false }
 
       const stored = await storeImageWithSize(image.dataUrl, 'generated')
       cacheImage(stored.id, image.dataUrl)
+      const localSaveError = await saveTaskGeneratedImages({ ...latestTask, prompt: image.revisedPrompt ?? latestTask.prompt }, [image.dataUrl])
       const latestBeforeUpdate = useStore.getState().tasks.find((task) => task.id === taskId)
       if (!latestBeforeUpdate) {
         await deleteUnreferencedImageIds([stored.id])
@@ -2863,6 +2892,7 @@ async function executeAgentRound(
       updateTaskInStore(taskId, {
         prompt: image.revisedPrompt ?? latestBeforeUpdate.prompt,
         outputImages: [stored.id],
+        localSaveError,
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -2871,6 +2901,7 @@ async function executeAgentRound(
         agentToolAction: image.action,
       })
       useStore.getState().setTaskStreamPreview(taskId)
+      if (localSaveError) useStore.getState().showToast(localSaveError, 'error')
       return { taskId, committed: true }
     }
 
@@ -3402,6 +3433,10 @@ async function executeAgentRound(
           apiProfileName: imageProfile.name,
           apiMode: imageProfile.apiMode,
           apiModel: imageProfile.model,
+          apiBaseUrl: imageProfile.baseUrl,
+          imageApiDialect: imageProfile.imageApiDialect,
+          imageAspectRatio: imageProfile.imageAspectRatio,
+          imageResolution: imageProfile.imageResolution,
           inputImageIds: uniqueIds([...(round?.inputImageIds ?? []), ...promptRefs.imageIds]),
           maskTargetImageId: round?.maskTargetImageId ?? null,
           maskImageId: round?.maskImageId ?? null,
@@ -3422,9 +3457,11 @@ async function executeAgentRound(
           agentToolCallId: image.toolCallId,
           agentToolAction: image.action,
         }
-        useStore.getState().setTasks([task, ...useStore.getState().tasks])
-        attachTaskToAgentRound(task.id)
-        await putTask(task)
+        const completedTask = { ...task, localSaveError: await saveTaskGeneratedImages(task, [image.dataUrl]) }
+        useStore.getState().setTasks([completedTask, ...useStore.getState().tasks])
+        attachTaskToAgentRound(completedTask.id)
+        await putTask(completedTask)
+        if (completedTask.localSaveError) useStore.getState().showToast(completedTask.localSaveError, 'error')
       }
 
       if (result.rawResponsePayload && streamingTaskIds.length > 0) {
@@ -3776,7 +3813,7 @@ async function executeTask(taskId: string) {
     }
 
     // 存储输出图片
-    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, localSaveError } = await storeTaskOutputImages(task, result.images)
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const actualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,
@@ -3814,6 +3851,7 @@ async function executeTask(taskId: string) {
     useStore.getState().setTaskStreamPreview(taskId)
     updateTaskInStore(taskId, {
       outputImages: outputIds,
+      localSaveError,
       transparentOriginalImages: transparentOriginalImageIds,
       outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
       streamPartialImageIds: undefined,
@@ -3833,7 +3871,7 @@ async function executeTask(taskId: string) {
       : `生成完成，共 ${outputIds.length} 张图片`
     // 批量任务只在整批结束时统一提示
     if (!batchTaskIds.has(taskId)) {
-      useStore.getState().showToast(completionMessage, failedCount > 0 ? 'error' : 'success')
+      useStore.getState().showToast(localSaveError || completionMessage, localSaveError || failedCount > 0 ? 'error' : 'success')
       if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `${completionMessage}。`)
     }
     const currentMask = useStore.getState().maskDraft
@@ -4034,6 +4072,10 @@ export async function retryTask(task: TaskRecord) {
     apiProfileName: activeProfile.name,
     apiMode: activeProfile.apiMode,
     apiModel: activeProfile.model,
+    apiBaseUrl: activeProfile.baseUrl,
+    imageApiDialect: activeProfile.imageApiDialect,
+    imageAspectRatio: activeProfile.imageAspectRatio,
+    imageResolution: activeProfile.imageResolution,
     inputImageIds: [...source.inputImageIds],
     maskTargetImageId: source.maskTargetImageId ?? null,
     maskImageId: source.maskImageId ?? null,
@@ -4041,6 +4083,7 @@ export async function retryTask(task: TaskRecord) {
     transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
     outputErrors: undefined,
+    localSaveError: undefined,
     transparentOriginalImages: undefined,
     actualParams: undefined,
     actualParamsByImage: undefined,
@@ -4479,7 +4522,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.customRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, localSaveError } = await storeTaskOutputImages(task, result.images)
   const actualParamsList = await resolveImageSizeParamsList(outputDataUrls, undefined, outputImageSizes)
   const latestBeforeUpdate = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latestBeforeUpdate || latestBeforeUpdate.status === 'done' || latestBeforeUpdate.error === AGENT_STOPPED_MESSAGE || (latestBeforeUpdate.status !== 'running' && !latestBeforeUpdate.customRecoverable)) {
@@ -4489,6 +4532,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
 
   updateTaskInStore(task.id, {
     outputImages: outputIds,
+    localSaveError,
     transparentOriginalImages: transparentOriginalImageIds,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
@@ -4496,7 +4540,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     ...createTaskDonePatch(task, Date.now()),
     customRecoverable: false,
   })
-  useStore.getState().showToast(`自定义异步任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+  useStore.getState().showToast(localSaveError || `自定义异步任务已恢复，共 ${outputIds.length} 张图片`, localSaveError ? 'error' : 'success')
   if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `自定义异步任务已恢复，共 ${outputIds.length} 张图片。`)
   else void continueRecoveredAgentRound(task.id)
 }

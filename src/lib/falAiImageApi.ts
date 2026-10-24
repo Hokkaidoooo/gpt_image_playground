@@ -49,8 +49,9 @@ function configureFal(profile: ApiProfile) {
   const config: Parameters<typeof fal.config>[0] = {
     credentials: profile.apiKey,
     suppressLocalCredentialsWarning: true,
+    retry: { maxRetries: 0 },
     // fal 的类型要求接受 RequestInfo，但 SDK 内部只传字符串 URL
-    fetch: apiFetch as typeof fetch,
+    fetch: ((input: string | URL, init?: RequestInit) => apiFetch(input, { ...init, timeoutSeconds: profile.timeout })) as typeof fetch,
   }
   if (baseUrl !== DEFAULT_FAL_BASE_URL) config.proxyUrl = baseUrl
   fal.config(config)

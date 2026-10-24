@@ -1,5 +1,6 @@
 import { invoke, isTauri as detectTauri } from '@tauri-apps/api/core'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { fetchThroughLocalBridge, hasLocalImageBridge } from './localRuntime'
 
 export const isTauri = detectTauri()
 
@@ -25,13 +26,17 @@ const abandonedBodies = isTauri ? new FinalizationRegistry<string>(cancelRequest
  * 错误与浏览器 fetch 语义一致：取消时抛 signal.reason（AbortError），其余抛 TypeError，
  * 其中连接阶段的错误为 FetchConnectError，读取响应体时的断流是普通 TypeError，不会被当作“请求立即失败”
  */
-export async function apiFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+export type ApiRequestInit = RequestInit & { timeoutSeconds?: number }
+
+export async function apiFetch(input: string | URL, init: ApiRequestInit = {}): Promise<Response> {
   // data:、blob: 和相对地址继续走原生 fetch；每次调用时读取 globalThis.fetch，测试会替换它
-  if (!isTauri || !/^https?:\/\//i.test(String(input))) return globalThis.fetch(input, init)
+  if (!isTauri && hasLocalImageBridge()) return fetchThroughLocalBridge(input, init)
+  const { timeoutSeconds: _timeoutSeconds, ...requestInit } = init
+  if (!isTauri || !/^https?:\/\//i.test(String(input))) return globalThis.fetch(input, requestInit)
 
   const signal = init.signal
   // 借 Request 把字符串、FormData、Blob 等请求体统一成字节，FormData 的 multipart 边界也会写进 Content-Type
-  const req = new Request(input, { ...init, signal: null })
+  const req = new Request(input, { ...requestInit, signal: null })
   const body = new Uint8Array(await req.arrayBuffer())
   if (signal?.aborted) throw abortReason(signal)
   const id = crypto.randomUUID()

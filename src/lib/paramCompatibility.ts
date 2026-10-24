@@ -1,14 +1,13 @@
 import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
 import { getActiveApiProfile, isOpenAICompatibleProvider } from './apiProfiles'
 import { getImageGenerationModel, isGptImage25Model } from './imageModels'
+import { getImageProviderCapabilities } from './imageProvider'
 import { normalizeCodexCliImageSize, normalizeImageSize } from './size'
 
 export const DEFAULT_FAL_IMAGE_SIZE = '1360x1024'
-export const MAX_FAL_OUTPUT_IMAGES = 4
-export const MAX_OPENAI_OUTPUT_IMAGES = 10
 
 export function getOutputImageLimitForSettings(settings: AppSettings) {
-  return getActiveApiProfile(settings).provider === 'fal' ? MAX_FAL_OUTPUT_IMAGES : MAX_OPENAI_OUTPUT_IMAGES
+  return getImageProviderCapabilities(getActiveApiProfile(settings)).maxOutputImages
 }
 
 export function normalizeParamsForSettings(
@@ -17,7 +16,21 @@ export function normalizeParamsForSettings(
   options: { hasInputImages?: boolean } = {},
 ): TaskParams {
   const activeProfile = getActiveApiProfile(settings)
-  const outputImageLimit = getOutputImageLimitForSettings(settings)
+  const caps = getImageProviderCapabilities(activeProfile)
+  const outputImageLimit = caps.maxOutputImages
+  if (caps.nativeParameters) {
+    // 切换协议时同步界面参数，避免把 GPT 专属选项展示为原生模型已经接受。
+    return {
+      ...params,
+      size: DEFAULT_PARAMS.size,
+      quality: DEFAULT_PARAMS.quality,
+      output_format: DEFAULT_PARAMS.output_format,
+      output_compression: DEFAULT_PARAMS.output_compression,
+      moderation: DEFAULT_PARAMS.moderation,
+      transparent_output: DEFAULT_PARAMS.transparent_output,
+      n: Math.min(outputImageLimit, Math.max(1, params.n || DEFAULT_PARAMS.n)),
+    }
+  }
   const nextParams: TaskParams = {
     ...params,
     size: normalizeImageSize(params.size) || DEFAULT_PARAMS.size,
