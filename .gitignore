@@ -11,3 +11,13 @@ src-tauri/dev-data/
 # 开发版更改数据目录时写入的指向文件和迁移标记
 src-tauri/data-dir*
 src-tauri/dev-downloads/
+
+# 本机运行数据与凭据
+local-server/data/
+local-server/settings.json
+local-server/gui_settings.json
+local-server/*.log
+local-server/__pycache__/
+local-server/tests/__pycache__/
+.compat-*/
+.reference-*/

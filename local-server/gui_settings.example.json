@@ -1,0 +1,8 @@
+{
+  "port": 17865,
+  "enforce_local_origin": true,
+  "serialize_image_requests": true,
+  "save_generated_images": true,
+  "max_upload_mb": 512,
+  "enforce_private_data_directory": true
+}
