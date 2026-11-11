@@ -21,10 +21,10 @@ vi.mock('./lib/db', () => {
   return {
     CURRENT_THUMBNAIL_VERSION: 2,
     getAllTasks: async () => [...tasks.values()],
-    putTask: async (task: TaskRecord) => {
+    putTask: vi.fn(async (task: TaskRecord) => {
       tasks.set(task.id, task)
       return task.id
-    },
+    }),
     deleteTask: vi.fn(async (id: string) => {
       tasks.delete(id)
     }),
@@ -143,7 +143,7 @@ import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { addImageFromFile, addImageFromUrl, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, retryTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { addImageFromFile, addImageFromUrl, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, getTaskRetryImageCount, getTaskRetryLabel, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, retryTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -6236,5 +6236,174 @@ describe('legacy local data upgrade', () => {
     expect(deleteDbImage).not.toHaveBeenCalled()
     expect(callImageApi).not.toHaveBeenCalled()
     expect(callAgentResponsesApi).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('sequential image task persistence', () => {
+  const imageResult = (index: number) => ({ images: [`data:image/png;base64,1024x1024-sequence-${index}`], actualParamsList: [{ size: '1024x1024' }] })
+  const profile = createDefaultOpenAIProfile({ id: 'sequential-profile', apiKey: 'test-key', baseUrl: 'https://api.freeshengtu.com', model: 'gpt-image-2.6-sunburst', timeout: 1 })
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    vi.mocked(callImageApi).mockReset()
+    vi.mocked(deleteDbImage).mockClear()
+    vi.stubGlobal('window', { location: new URL('http://127.0.0.1:17865/'), __LOCAL_IMAGE_BOOTSTRAP__: { preset: 'offline-fixture', token: 'test-only-local-session', bridgeVersion: 2 } })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response('{"saved":true}')))
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id }),
+      appMode: 'gallery', prompt: '顺序生成测试', params: { ...DEFAULT_PARAMS, n: 3 }, tasks: [], inputImages: [], maskDraft: null,
+      privacyMode: null, galleryInputDraft: null, agentInputDrafts: {}, reusedTaskApiProfileId: null, reusedTaskApiModel: null, showToast: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('persists each completed batch before continuing and avoids duplicate image/archive writes', async () => {
+    const continueRequest = deferred<void>()
+    const firstSaved = deferred<void>()
+    vi.mocked(callImageApi).mockImplementationOnce(async (opts) => {
+      await opts.onRequestCompleted?.(imageResult(0), 0)
+      firstSaved.resolve()
+      await continueRequest.promise
+      await opts.onRequestCompleted?.(imageResult(1), 1)
+      return { images: [...imageResult(0).images, ...imageResult(1).images], failedRequests: [{ requestIndex: 2, error: '供应商返回524，后续已停止' }] }
+    })
+
+    await submitTask()
+    await firstSaved.promise
+    const checkpoint = (await getAllTasks())[0]
+    expect(checkpoint).toMatchObject({ status: 'running', outputErrors: [{ requestIndex: 1, error: '尚未完成；中断后可补齐。' }, { requestIndex: 2, error: '尚未完成；中断后可补齐。' }] })
+    expect(checkpoint.outputImages).toHaveLength(1)
+    expect(await getImage(checkpoint.outputImages[0])).toMatchObject({ dataUrl: imageResult(0).images[0] })
+    expect(fetch).toHaveBeenCalledTimes(1)
+    continueRequest.resolve()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0].status).toBe('done'))
+    expect(useStore.getState().tasks[0].outputImages).toHaveLength(2)
+    expect(await getAllImageIds()).toHaveLength(2)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect((await getAllTasks())[0].outputErrors).toEqual([{ requestIndex: 2, error: '供应商返回524，后续已停止' }])
+  })
+
+  it('lets three individually timely requests finish beyond one request timeout', async () => {
+    vi.useFakeTimers()
+    vi.mocked(callImageApi).mockImplementationOnce(async (opts) => {
+      for (let index = 0; index < 3; index++) {
+        await new Promise((resolve) => setTimeout(resolve, 800))
+        expect(opts.shouldContinue?.()).toBe(true)
+        await opts.onRequestCompleted?.(imageResult(index), index)
+      }
+      return { images: [0, 1, 2].flatMap((index) => imageResult(index).images) }
+    })
+    await submitTask()
+    await vi.advanceTimersByTimeAsync(1600)
+    expect(useStore.getState().tasks[0]).toMatchObject({ status: 'running' })
+    expect(useStore.getState().tasks[0].outputImages).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(800)
+    expect(useStore.getState().tasks[0].status).toBe('done')
+    expect(useStore.getState().tasks[0].outputImages).toHaveLength(3)
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('preserves successful images and creates only missing requests even in overwrite-all mode', async () => {
+    const partial = task({
+      params: { ...DEFAULT_PARAMS, n: 3 }, outputImages: ['existing-success'],
+      outputErrors: [{ requestIndex: 1, error: '524' }, { requestIndex: 2, error: '未发送' }],
+    })
+    await putImage({ id: 'existing-success', dataUrl: 'data:image/png;base64,existing', source: 'generated', createdAt: 1 })
+    useStore.setState({ settings: { ...useStore.getState().settings, retryMode: 'overwriteAll', alwaysShowRetryButton: true }, tasks: [partial] })
+    vi.mocked(callImageApi).mockResolvedValueOnce({ images: imageResult(1).images })
+    expect(getTaskRetryImageCount(partial)).toBe(2)
+    expect(getTaskRetryLabel(partial)).toBe('补齐剩余2张')
+    await retryTask(partial)
+    await vi.waitFor(() => expect(useStore.getState().tasks[0].status).toBe('done'))
+    expect(callImageApi).toHaveBeenCalledWith(expect.objectContaining({ params: expect.objectContaining({ n: 2 }) }))
+    expect(useStore.getState().tasks).toHaveLength(2)
+    expect(useStore.getState().tasks[1]).toEqual(partial)
+    expect(useStore.getState().tasks[0].id).not.toBe(partial.id)
+    expect(await getImage('existing-success')).toBeDefined()
+    expect(deleteDbImage).not.toHaveBeenCalled()
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('补齐剩余2张，已完成图片保留在原任务', 'info')
+  })
+
+  it('stops later requests when the task is deleted', async () => {
+    const pending = deferred<Awaited<ReturnType<typeof callImageApi>>>()
+    vi.mocked(callImageApi).mockImplementationOnce(() => pending.promise)
+    await submitTask()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+    const opts = vi.mocked(callImageApi).mock.calls[0][0]
+    expect(opts.shouldContinue?.()).toBe(true)
+    await removeTask(useStore.getState().tasks[0])
+    expect(opts.shouldContinue?.()).toBe(false)
+    pending.resolve({ images: [] })
+    expect(useStore.getState().tasks).toEqual([])
+  })
+
+  it('prevents duplicate continuation requests while running and after completion', async () => {
+    const partial = task({ params: { ...DEFAULT_PARAMS, n: 3 }, outputImages: ['existing-success'], outputErrors: [{ requestIndex: 1, error: '524' }, { requestIndex: 2, error: '未发送' }] })
+    useStore.setState({ tasks: [partial], settings: { ...useStore.getState().settings, retryMode: 'overwriteAll', alwaysShowRetryButton: true } })
+    const pending = deferred<Awaited<ReturnType<typeof callImageApi>>>()
+    vi.mocked(callImageApi).mockImplementationOnce(() => pending.promise)
+    await Promise.all([retryTask(partial), retryTask(partial)])
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+    expect(useStore.getState().tasks).toHaveLength(2)
+    expect(useStore.getState().tasks[0].retryOfTaskId).toBe(partial.id)
+    pending.resolve({ images: [...imageResult(1).images, ...imageResult(2).images] })
+    await vi.waitFor(() => expect(useStore.getState().tasks[0].status).toBe('done'))
+    await retryTask(partial)
+    expect(callImageApi).toHaveBeenCalledOnce()
+    expect(useStore.getState().tasks[1]).toEqual(partial)
+  })
+
+  it('keeps final images visible when the terminal task record cannot be saved', async () => {
+    const pending = deferred<Awaited<ReturnType<typeof callImageApi>>>()
+    vi.mocked(callImageApi).mockImplementationOnce(() => pending.promise)
+    await submitTask()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+    vi.mocked(putDbTask).mockRejectedValueOnce(new Error('终态记录写入失败'))
+    pending.resolve(imageResult(0))
+    await vi.waitFor(() => expect(useStore.getState().tasks[0].completionError).toContain('终态记录写入失败'))
+    expect(useStore.getState().tasks[0].status).toBe('done')
+    expect(useStore.getState().tasks[0].outputImages).toHaveLength(1)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the submitted compatibility policy while settings change', async () => {
+    const pending = deferred<Awaited<ReturnType<typeof callImageApi>>>()
+    vi.mocked(callImageApi).mockImplementationOnce(() => pending.promise)
+    await submitTask()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+    const submitted = useStore.getState().tasks[0]
+    expect(submitted.imageRequestCompatibility).toEqual({ mode: 'auto' })
+    useStore.getState().setSettings({ profiles: [{ ...profile, imageRequestCompatibility: { mode: 'standard' } }] })
+    expect(getTaskApiProfile(useStore.getState().settings, submitted)?.imageRequestCompatibility).toEqual({ mode: 'auto' })
+    pending.resolve({ images: [] })
+    await vi.waitFor(() => expect(useStore.getState().tasks[0].status).toBe('done'))
+  })
+
+  it('retains generated images and exposes a checkpoint persistence error without duplicate archive', async () => {
+    const runCallback = deferred<void>()
+    vi.mocked(callImageApi).mockImplementationOnce(async (opts) => {
+      await runCallback.promise
+      try {
+        await opts.onRequestCompleted?.(imageResult(0), 0)
+      } catch (error) {
+        return { images: imageResult(0).images, completionError: `图片已生成，但结果保存未完成：${String(error)}`, failedRequests: [{ requestIndex: 1, error: '未发送' }, { requestIndex: 2, error: '未发送' }] }
+      }
+      throw new Error('Expected checkpoint failure')
+    })
+    await submitTask()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+    vi.mocked(putDbTask).mockRejectedValueOnce(new Error('IndexedDB写入失败'))
+    runCallback.resolve()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0].status).toBe('done'))
+    expect(useStore.getState().tasks[0].completionError).toContain('IndexedDB写入失败')
+    expect(useStore.getState().tasks[0].outputImages).toHaveLength(1)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(await getAllImageIds()).toHaveLength(1)
   })
 })

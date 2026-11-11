@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { TaskParams, TaskRecord } from '../types'
+import { getTaskOmittedImageParameters } from './imageRequestCompatibility'
 import ViewportTooltip from '../components/ViewportTooltip'
 
 type ParamKey = keyof TaskParams
@@ -69,7 +70,8 @@ export function getParamDisplay(task: TaskRecord, paramKey: ParamKey, actualPara
     : task.params[paramKey]
   const actualValue = actualParams?.[paramKey]
   const hasActualValue = actualValue !== undefined && actualValue !== null
-  const displayValue = hasActualValue ? actualValue : requestedValue
+  const usesProviderDefault = getTaskOmittedImageParameters(task).some((name) => name === paramKey)
+  const displayValue = hasActualValue ? actualValue : usesProviderDefault ? '供应商默认' : requestedValue
   const isMismatch =
     hasActualValue &&
     requestedValue !== 'auto' &&

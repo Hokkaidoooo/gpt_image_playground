@@ -25,6 +25,8 @@ import {
   PROMPT_REWRITE_GUARD_PREFIX,
 } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
+import { resolveImageRequestCompatibility, usesSequentialImageRequests } from './imageRequestCompatibility'
+import { prepareImageInputs, type PreparedImageInputs } from './imageInputPreparation'
 import { apiFetch, FetchConnectError } from './platform'
 import { isEventStreamResponse, readJsonServerSentEvents } from './serverSentEvents'
 import { prependCodexCliSizePrompt } from './size'
@@ -455,16 +457,89 @@ export async function callOpenAICompatibleImageApi(opts: CallApiOptions, profile
     : callImagesApi(opts, profile)
 }
 
-async function callImagesApi(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
-  const n = opts.params.n > 0 ? opts.params.n : 1
-  if ((profile.codexCli || (profile.streamImages && n > 1)) && n > 1) {
-    return callImagesApiConcurrent(opts, profile, n)
-  }
+type PreparedImageApiOptions = CallApiOptions & { preparedImageInputs: PreparedImageInputs }
 
-  return callImagesApiSingle(opts, profile)
+async function callImagesApi(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
+  const n = opts.params.n
+  if (!Number.isSafeInteger(n) || n < 1) throw new Error('生成张数必须是正整数。')
+  const compatibility = resolveImageRequestCompatibility(profile)
+  if (compatibility.editImageField === 'image' && opts.inputImageDataUrls.length > 1) throw new Error('当前供应商配置使用单张参考图字段 image，请只保留一张参考图，或在兼容设置中选择 image[]。')
+  if (opts.shouldContinue && !opts.shouldContinue()) throw new Error('任务已停止，本次请求未发送。')
+  const preparedImageInputs = await prepareImageInputs(opts.inputImageDataUrls, opts.maskDataUrl, compatibility)
+  if (opts.shouldContinue && !opts.shouldContinue()) throw new Error('任务已停止，本次请求未发送。')
+  await opts.onInputImagesPrepared?.(preparedImageInputs.adjustments)
+  const preparedOptions = { ...opts, preparedImageInputs }
+  if (compatibility.mode !== 'standard') {
+    const batchSize = usesSequentialImageRequests(profile, n) ? compatibility.maxImagesPerRequest : n
+    return callImagesApiSequential(preparedOptions, profile, batchSize)
+  }
+  if ((profile.codexCli || profile.streamImages) && n > 1) {
+    return callImagesApiConcurrent(preparedOptions, profile, n)
+  }
+  return callImagesApiSingle(preparedOptions, profile)
 }
 
-async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile, n: number): Promise<CallApiResult> {
+async function callImagesApiSequential(opts: PreparedImageApiOptions, profile: ApiProfile, batchSize: number): Promise<CallApiResult> {
+  const results: PromiseSettledResult<CallApiResult>[] = []
+  const counts: number[] = []
+  const total = opts.params.n
+  for (let requestIndex = 0; requestIndex < total; requestIndex += batchSize) {
+    const count = Math.min(batchSize, total - requestIndex)
+    if (opts.shouldContinue && !opts.shouldContinue()) {
+      results.push({ status: 'rejected', reason: new Error('任务已停止，剩余图片未发送。') })
+      counts.push(total - requestIndex)
+      break
+    }
+    let result: CallApiResult
+    try {
+      result = await callImagesApiSingle({
+        ...opts,
+        params: { ...opts.params, n: count },
+        onPartialImage: opts.onPartialImage
+          ? (partial) => opts.onPartialImage?.({ ...partial, requestIndex })
+          : undefined,
+      }, profile)
+    } catch (error) {
+      results.push({ status: 'rejected', reason: error })
+      counts.push(count)
+      if (requestIndex + count < total) {
+        results.push({ status: 'rejected', reason: new Error('前一批请求失败，后续图片未发送。') })
+        counts.push(total - requestIndex - count)
+      }
+      break
+    }
+    if (result.images.length < count) {
+      result = {
+        ...result,
+        failedRequests: Array.from({ length: count - result.images.length }, (_, index) => ({
+          requestIndex: result.images.length + index,
+          error: `供应商只返回 ${result.images.length} 张图片，本批请求 ${count} 张；缺少的图片未自动补发。`,
+        })),
+      }
+    } else if (result.images.length > count) {
+      result = { ...result, completionError: `供应商返回 ${result.images.length} 张图片，超过本批请求的 ${count} 张；已保留全部结果并停止后续请求。` }
+    }
+    try {
+      await opts.onRequestCompleted?.(result, requestIndex)
+    } catch (error) {
+      result = { ...result, completionError: `图片已生成，但结果保存未完成：${getErrorMessage(error)}` }
+    }
+    results.push({ status: 'fulfilled', value: result })
+    const occupiedSlots = Math.max(count, result.images.length)
+    counts.push(occupiedSlots)
+    if (result.failedRequests?.length || result.completionError) {
+      if (requestIndex + occupiedSlots < total) {
+        results.push({ status: 'rejected', reason: new Error('前一批结果未完整确认，后续图片未发送。') })
+        counts.push(total - requestIndex - occupiedSlots)
+      }
+      break
+    }
+  }
+  if (results.length === 1 && results[0].status === 'fulfilled') return results[0].value
+  return mergeImageApiResults(results, counts)
+}
+
+async function callImagesApiConcurrent(opts: PreparedImageApiOptions, profile: ApiProfile, n: number): Promise<CallApiResult> {
   const singleOpts = {
     ...opts,
     params: {
@@ -482,10 +557,10 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
     }, profile)),
   )
 
-  return mergeConcurrentApiResults(results)
+  return mergeImageApiResults(results)
 }
 
-async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
+async function callImagesApiSingle(opts: PreparedImageApiOptions, profile: ApiProfile): Promise<CallApiResult> {
   const { prompt: originalPrompt, params, inputImageDataUrls } = opts
   const sizePrompt = profile.codexCli && !opts.skipCodexCliSizePrompt
     ? prependCodexCliSizePrompt(originalPrompt, params.size)
@@ -494,11 +569,31 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
     ? `${PROMPT_REWRITE_GUARD_PREFIX}\n${sizePrompt}`
     : sizePrompt
   const isEdit = inputImageDataUrls.length > 0
-  const mime = MIME_MAP[params.output_format] || 'image/png'
+  const compatibility = resolveImageRequestCompatibility(profile)
+  const mime = compatibility.omitParameters.includes('output_format') ? MIME_MAP.png : MIME_MAP[params.output_format]
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
   const requestHeaders = createRequestHeaders(profile)
   const paths = createOpenAICompatiblePaths()
+  const body: Record<string, string | number | boolean> = {
+    model: profile.model,
+    prompt,
+    output_format: params.output_format,
+    moderation: params.moderation,
+  }
+  if (!profile.codexCli) {
+    body.size = params.size
+    body.quality = params.quality
+  }
+  if (opts.nativeTransparentBackground) body.background = 'transparent'
+  if (params.output_format !== 'png' && params.output_compression != null) body.output_compression = params.output_compression
+  if (params.n > 1) body.n = params.n
+  if (profile.responseFormatB64Json) body.response_format = 'b64_json'
+  if (profile.streamImages) {
+    body.stream = true
+    body.partial_images = getStreamPartialImages(profile)
+  }
+  for (const parameter of compatibility.omitParameters) delete body[parameter]
 
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(createRequestTimeoutError(profile.timeout)), profile.timeout * 1000)
@@ -508,45 +603,10 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
 
     if (isEdit) {
       const formData = new FormData()
-      formData.append('model', profile.model)
-      formData.append('prompt', prompt)
-      if (!profile.codexCli) {
-        formData.append('size', params.size)
-      }
-      formData.append('output_format', params.output_format)
-      formData.append('moderation', params.moderation)
-      if (opts.nativeTransparentBackground) {
-        formData.append('background', 'transparent')
-      }
+      for (const [name, value] of Object.entries(body)) formData.append(name, String(value))
 
-      if (!profile.codexCli) {
-        formData.append('quality', params.quality)
-      }
-
-      if (params.output_format !== 'png' && params.output_compression != null) {
-        formData.append('output_compression', String(params.output_compression))
-      }
-      if (params.n > 1) {
-        formData.append('n', String(params.n))
-      }
-      if (profile.responseFormatB64Json) {
-        formData.append('response_format', 'b64_json')
-      }
-      if (profile.streamImages) {
-        formData.append('stream', 'true')
-        formData.append('partial_images', String(getStreamPartialImages(profile)))
-      }
-
-      const imageBlobs: Blob[] = []
-      for (let i = 0; i < inputImageDataUrls.length; i++) {
-        const dataUrl = inputImageDataUrls[i]
-        const blob = opts.maskDataUrl && i === 0
-          ? await imageDataUrlToPngBlob(dataUrl)
-          : await dataUrlToBlob(dataUrl)
-        imageBlobs.push(blob)
-      }
-
-      const maskBlob = opts.maskDataUrl ? await maskDataUrlToPngBlob(opts.maskDataUrl) : null
+      const imageBlobs = opts.preparedImageInputs.blobs
+      const maskBlob = opts.preparedImageInputs.mask
       if (opts.maskDataUrl) {
         assertMaskEditFileSize('遮罩主图文件', imageBlobs[0]?.size ?? 0)
         assertMaskEditFileSize('遮罩文件', maskBlob?.size ?? 0)
@@ -558,13 +618,14 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       for (let i = 0; i < imageBlobs.length; i++) {
         const blob = imageBlobs[i]
         const ext = blob.type.split('/')[1] || 'png'
-        formData.append('image[]', blob, `input-${i + 1}.${ext}`)
+        formData.append(compatibility.editImageField, blob, `input-${i + 1}.${ext}`)
       }
 
       if (maskBlob) {
         formData.append('mask', maskBlob, 'mask.png')
       }
 
+      if (opts.shouldContinue && !opts.shouldContinue()) throw new Error('任务已停止，本次请求未发送。')
       response = await apiFetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
         timeoutSeconds: profile.timeout,
         method: 'POST',
@@ -574,39 +635,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         signal: controller.signal,
       })
     } else {
-      const body: Record<string, unknown> = {
-        model: profile.model,
-        prompt,
-        output_format: params.output_format,
-        moderation: params.moderation,
-      }
-
-      if (opts.nativeTransparentBackground) {
-        body.background = 'transparent'
-      }
-
-      if (!profile.codexCli) {
-        body.size = params.size
-      }
-
-      if (!profile.codexCli) {
-        body.quality = params.quality
-      }
-
-      if (params.output_format !== 'png' && params.output_compression != null) {
-        body.output_compression = params.output_compression
-      }
-      if (params.n > 1) {
-        body.n = params.n
-      }
-      if (profile.responseFormatB64Json) {
-        body.response_format = 'b64_json'
-      }
-      if (profile.streamImages) {
-        body.stream = true
-        body.partial_images = getStreamPartialImages(profile)
-      }
-
+      if (opts.shouldContinue && !opts.shouldContinue()) throw new Error('任务已停止，本次请求未发送。')
       response = await apiFetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
         timeoutSeconds: profile.timeout,
         method: 'POST',
@@ -625,11 +654,10 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
     }
 
-    if (profile.streamImages && isEventStreamResponse(response)) {
-      return await parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
-    }
-
-    return await parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
+    const result = profile.streamImages && isEventStreamResponse(response)
+      ? await parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
+      : await parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
+    return { ...result, ...(opts.preparedImageInputs.adjustments.length ? { inputImageAdjustments: opts.preparedImageInputs.adjustments } : {}) }
   } finally {
     clearTimeout(timeoutId)
   }
@@ -974,7 +1002,7 @@ async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile,
   }
 }
 
-function mergeConcurrentApiResults(results: PromiseSettledResult<CallApiResult>[]): CallApiResult {
+function mergeImageApiResults(results: PromiseSettledResult<CallApiResult>[], counts = results.map(() => 1)): CallApiResult {
   const successfulResults = results
     .filter((result): result is PromiseFulfilledResult<CallApiResult> => result.status === 'fulfilled')
     .map((result) => result.value)
@@ -991,9 +1019,16 @@ function mergeConcurrentApiResults(results: PromiseSettledResult<CallApiResult>[
     result.revisedPrompts?.length ? result.revisedPrompts : result.images.map(() => undefined),
   )
   const rawImageUrls = successfulResults.flatMap((result) => result.rawImageUrls ?? [])
-  const failedRequests = results.flatMap((result, requestIndex) =>
-    result.status === 'rejected' ? [{ requestIndex, error: getErrorMessage(result.reason) }] : [],
-  )
+  let offset = 0
+  const failedRequests = results.flatMap((result, index) => {
+    const start = offset
+    offset += counts[index]
+    return result.status === 'rejected'
+      ? Array.from({ length: counts[index] }, (_, slot) => ({ requestIndex: start + slot, error: getErrorMessage(result.reason) }))
+      : (result.value.failedRequests ?? []).map((failure) => ({ ...failure, requestIndex: start + failure.requestIndex }))
+  })
+  const completionError = successfulResults.map((result) => result.completionError).filter(Boolean).join('\n')
+  const inputImageAdjustments = [...new Set(successfulResults.flatMap((result) => result.inputImageAdjustments ?? []))]
 
   return {
     images,
@@ -1002,6 +1037,8 @@ function mergeConcurrentApiResults(results: PromiseSettledResult<CallApiResult>[
     revisedPrompts,
     ...(rawImageUrls.length ? { rawImageUrls } : {}),
     ...(failedRequests.length ? { failedRequests } : {}),
+    ...(completionError ? { completionError } : {}),
+    ...(inputImageAdjustments.length ? { inputImageAdjustments } : {}),
   }
 }
 
@@ -1015,7 +1052,7 @@ async function callCustomHttpImageApiConcurrent(
     ...opts,
     params: { ...opts.params, n: 1 },
   }, profile, customProvider)))
-  return mergeConcurrentApiResults(results)
+  return mergeImageApiResults(results)
 }
 
 async function callResponsesImageApi(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
@@ -1031,7 +1068,7 @@ async function callResponsesImageApi(opts: CallApiOptions, profile: ApiProfile):
       : undefined,
   }, profile))
   const results = await Promise.allSettled(promises)
-  return mergeConcurrentApiResults(results)
+  return mergeImageApiResults(results)
 }
 
 async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {

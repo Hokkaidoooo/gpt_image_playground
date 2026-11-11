@@ -96,3 +96,16 @@ describe('parseDefaultApiUrl', () => {
     expect(() => parseDefaultApiUrl(`http://127.0.0.1:17865/?${params}`)).toThrow('不能包含账号、密码、查询参数或片段')
   })
 })
+
+
+describe('兼容设置URL预置', () => {
+  it('保留显式兼容参数', () => {
+    const compatibility = { mode: 'custom', maxImagesPerRequest: 4, omitParameters: ['moderation'], editImageField: 'image' }
+    const params = new URLSearchParams({ imageRequestCompatibility: JSON.stringify(compatibility) })
+    expect(parseDefaultApiUrl(`https://relay.example.test/v1?${params}`).imageRequestCompatibility).toEqual(compatibility)
+  })
+
+  it('非法兼容参数显示可读错误', () => {
+    expect(() => parseDefaultApiUrl('https://relay.example.test/v1?imageRequestCompatibility=oops')).toThrow('兼容设置不是有效 JSON')
+  })
+})

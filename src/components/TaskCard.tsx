@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, type ReactNode } from 'react'
 import type { TaskRecord } from '../types'
 import { useStore, retryTask } from '../store'
+import { getTaskRetryAction } from '../lib/taskState'
 import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imageCache'
 import { useNearViewport } from '../hooks/useNearViewport'
 import { formatImageRatio } from '../lib/size'
@@ -80,6 +81,8 @@ export default function TaskCard({
   const [streamPreviewLoaded, setStreamPreviewLoaded] = useState(false)
   const toggleTaskSelection = useStore((s) => s.toggleTaskSelection)
   const settings = useStore((s) => s.settings)
+  const tasks = useStore((s) => s.tasks)
+  const retryAction = getTaskRetryAction(task, tasks)
   const openFavoritePicker = useStore((s) => s.openFavoritePicker)
   const privacyMode = useStore((s) => Boolean(s.privacyMode))
   const streamPreviewSrc = useStore((s) => s.streamPreviews[task.id] || '')
@@ -556,6 +559,14 @@ export default function TaskCard({
               </p>
             )}
           </div>
+          {Boolean(task.inputImageAdjustments?.length) && (
+            <p className="mb-2 text-xs leading-relaxed text-gray-500 dark:text-gray-400">参考图上传副本已优化，原图保留；详情中可查看调整记录</p>
+          )}
+          {task.completionError && (
+            <p role="alert" className="mb-2 line-clamp-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400" title={task.completionError}>
+              {task.completionError}
+            </p>
+          )}
           {task.localSaveError && (
             <p role="alert" className="mb-2 line-clamp-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400" title={task.localSaveError}>
               本机保存未完成，可下载图库图片。{task.localSaveError}
@@ -649,9 +660,10 @@ export default function TaskCard({
               onTouchEnd={(e) => e.stopPropagation()}
               onTouchCancel={(e) => e.stopPropagation()}
             >
-              {((task.status === 'error' && !isFalReconnecting && !isCustomReconnecting) || (task.status === 'done' && settings.alwaysShowRetryButton)) && (
+              {((task.status === 'error' && !isFalReconnecting && !isCustomReconnecting) || (task.status === 'done' && (settings.alwaysShowRetryButton || outputErrorCount > 0 || task.retryOfTaskId))) && (
                 <TaskActionButton
-                  tooltip="重试任务"
+                  tooltip={retryAction.label}
+                  disabled={retryAction.disabled}
                   onClick={() => retryTask(task)}
                   className="p-1.5 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-400 hover:text-blue-500 transition"
                 >

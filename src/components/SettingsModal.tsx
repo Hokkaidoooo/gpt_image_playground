@@ -71,6 +71,7 @@ import ZipDownloadRouteModal, { ZIP_DOWNLOAD_ROUTE_OPTIONS } from './settings/Zi
 import StorageInfoSection from './settings/StorageInfoSection'
 import AboutSettingsTab from './settings/AboutSettingsTab'
 import ImageModelsPanel from './settings/ImageModelsPanel'
+import ImageCompatibilityPanel from './settings/ImageCompatibilityPanel'
 import MarkdownRenderer from './MarkdownRenderer'
 
 function newId(prefix: string) {
@@ -522,6 +523,7 @@ export default function SettingsModal() {
       if (profile.name.trim()) url.searchParams.set('profileName', profile.name.trim())
       if (profile.reasoningEffort) url.searchParams.set('reasoningEffort', profile.reasoningEffort)
       if (profile.codexCli) url.searchParams.set('codexCli', 'true')
+      if (profile.imageRequestCompatibility) url.searchParams.set('imageRequestCompatibility', JSON.stringify(profile.imageRequestCompatibility))
       if (profile.streamImages !== DEFAULT_SETTINGS.streamImages) url.searchParams.set('streamImages', String(Boolean(profile.streamImages)))
       if (profile.streamPartialImages !== DEFAULT_STREAM_PARTIAL_IMAGES) url.searchParams.set('streamPartialImages', String(normalizeStreamPartialImages(profile.streamPartialImages)))
       if (profile.transparentBackgroundMethod !== 'api') url.searchParams.set('transparentBackgroundMethod', profile.transparentBackgroundMethod)
@@ -1719,6 +1721,10 @@ export default function SettingsModal() {
                     用于指导模型在执行任务时的思考深度，更高的档位会使模型花费更长时间进行思考，有助于提升 Agent 模式下模型完成复杂任务的能力。并非所有模型都支持全部推理强度。支持通过链接参数导入：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">?reasoningEffort=high</code>。
                   </div>
                 </div>
+              )}
+
+              {activeProfile.provider === 'openai' && activeProfile.apiMode === 'images' && !activeImageCapabilities.nativeParameters && (
+                <ImageCompatibilityPanel profile={activeProfile} disabled={activeProfileLocked} onPatch={commitActiveProfilePatch} />
               )}
 
               {/* 8. 流式传输 + 中间步骤图像数 */}

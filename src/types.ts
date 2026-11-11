@@ -72,6 +72,17 @@ export interface CustomProviderDefinition {
 
 export type ImageApiDialect = 'auto' | 'openai' | 'xai' | 'gemini' | 'gemini-interactions' | 'imagen'
 
+export type ImageRequestOmittableParameter = 'moderation' | 'quality' | 'size' | 'output_format' | 'output_compression' | 'response_format'
+
+export interface ImageRequestCompatibility {
+  mode: 'auto' | 'standard' | 'custom'
+  maxImagesPerRequest?: number
+  omitParameters?: ImageRequestOmittableParameter[]
+  editImageField?: 'image[]' | 'image'
+  referenceImagePolicy?: 'auto' | 'original'
+  maxReferenceImageMB?: number
+}
+
 export interface ApiProfile {
   id: string
   /** 当前部署指定的默认预置配置。 */
@@ -89,6 +100,7 @@ export interface ApiProfile {
   imageApiDialect?: ImageApiDialect
   imageAspectRatio?: string
   imageResolution?: string
+  imageRequestCompatibility?: ImageRequestCompatibility
   imageGenerationModel?: string
   timeout: number
   apiMode: ApiMode
@@ -99,7 +111,7 @@ export interface ApiProfile {
   streamImages?: boolean
   streamPartialImages?: number
   transparentBackgroundMethod: 'api' | 'local'
-  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'imageGenerationModel' | 'imageApiDialect' | 'imageAspectRatio' | 'imageResolution' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>>>>
+  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'imageGenerationModel' | 'imageApiDialect' | 'imageAspectRatio' | 'imageResolution' | 'imageRequestCompatibility' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>>>>
 }
 
 export interface PresetAgentConfig {
@@ -258,6 +270,8 @@ export type TaskStatus = 'running' | 'done' | 'error'
 
 export interface TaskRecord {
   id: string
+  /** 补齐任务的直接来源任务；沿父关系保留已完成图片。 */
+  retryOfTaskId?: string
   prompt: string
   params: TaskParams
   /** 生成时使用的 Provider 类型 */
@@ -275,6 +289,7 @@ export interface TaskRecord {
   imageApiDialect?: ImageApiDialect
   imageAspectRatio?: string
   imageResolution?: string
+  imageRequestCompatibility?: ImageRequestCompatibility
   /** fal.ai 队列请求 ID，用于连接断开后的结果恢复 */
   falRequestId?: string
   /** fal.ai 队列 endpoint，用于连接断开后的状态和结果查询 */
@@ -307,6 +322,10 @@ export interface TaskRecord {
   outputErrors?: Array<{ requestIndex: number; error: string }>
   /** 图片已生成，但本机归档未完成；保留浏览器图片并明确显示原因。 */
   localSaveError?: string
+  /** 图片已保留，但供应商返回或后续处理未完整完成。 */
+  completionError?: string
+  /** 本机生成上传副本时的格式、大小及尺寸调整。 */
+  inputImageAdjustments?: string[]
   /** 流式生成的中间步骤图片 id 列表，仅失败时保留供排查/下载 */
   streamPartialImageIds?: string[]
   /** API 返回的原始图片 HTTP URL（非 base64 时记录） */

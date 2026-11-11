@@ -1012,3 +1012,24 @@ describe('URL settings params', () => {
     ))).toEqual({})
   })
 })
+
+
+describe('兼容设置URL导入', () => {
+  it('导入、辨认及清理兼容参数', () => {
+    const current = normalizeSettings({ profiles: [createDefaultOpenAIProfile({ id: 'saved' })] })
+    const compatibility = { mode: 'custom', maxImagesPerRequest: 4, omitParameters: ['moderation'], editImageField: 'image' }
+    const params = new URLSearchParams({ profileId: 'saved', imageRequestCompatibility: JSON.stringify(compatibility) })
+    expect(hasUrlSettingParams(params)).toBe(true)
+    const next = normalizeSettings(buildSettingsFromUrlParams(current, params))
+    expect(next.profiles[0].imageRequestCompatibility).toEqual(compatibility)
+    clearUrlSettingParams(params)
+    expect(params.toString()).toBe('')
+  })
+
+  it('查询参数可用standard显式覆盖JSON中的自定义规则', () => {
+    const current = normalizeSettings({ profiles: [createDefaultOpenAIProfile({ id: 'saved' })] })
+    const params = new URLSearchParams({ profileId: 'saved', imageRequestCompatibility: JSON.stringify({ mode: 'standard' }), settings: JSON.stringify({ profiles: [{ ...current.profiles[0], imageRequestCompatibility: { mode: 'custom', maxImagesPerRequest: 4 } }] }) })
+    const next = normalizeSettings(buildSettingsFromUrlParams(current, params))
+    expect(next.profiles.find((item) => item.id === 'saved')?.imageRequestCompatibility).toEqual({ mode: 'standard' })
+  })
+})

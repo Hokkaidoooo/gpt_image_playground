@@ -3,6 +3,7 @@ import { DEFAULT_STREAM_PARTIAL_IMAGES, REASONING_EFFORT_VALUES } from '../types
 
 import { normalizeBaseUrl } from './devProxy'
 import { normalizeImageProviderBaseUrl } from './imageProviderUrl'
+import { parseImageRequestCompatibilityParam } from './imageRequestCompatibility'
 
 export function normalizeImageApiDialect(value: unknown): ImageApiDialect {
   if (value === undefined || value === '' || value === 'auto') return 'auto'
@@ -32,6 +33,7 @@ export interface DefaultApiUrlPatch {
   imageApiDialect?: ImageApiDialect
   imageAspectRatio?: string
   imageResolution?: string
+  imageRequestCompatibility?: ApiProfile['imageRequestCompatibility']
   reasoningEffort?: ReasoningEffort
   name?: string
   codexCli?: boolean
@@ -61,6 +63,7 @@ export function parseDefaultApiUrl(rawUrl: string): DefaultApiUrlPatch {
   const imageApiDialectParam = parsed.searchParams.get('imageApiDialect')
   const imageAspectRatioParam = parsed.searchParams.get('imageAspectRatio')
   const imageResolutionParam = parsed.searchParams.get('imageResolution')
+  const compatibilityParam = parsed.searchParams.get('imageRequestCompatibility')
   const reasoningEffortParam = parsed.searchParams.get('reasoningEffort')
   const profileNameParam = parsed.searchParams.get('profileName')
   const codexCliParam = parsed.searchParams.get('codexCli')
@@ -76,6 +79,7 @@ export function parseDefaultApiUrl(rawUrl: string): DefaultApiUrlPatch {
   if (imageApiDialect !== undefined) patch.imageApiDialect = imageApiDialect
   if (imageAspectRatioParam !== null) patch.imageAspectRatio = imageAspectRatioParam.trim()
   if (imageResolutionParam !== null) patch.imageResolution = imageResolutionParam.trim()
+  if (compatibilityParam !== null) patch.imageRequestCompatibility = parseImageRequestCompatibilityParam(compatibilityParam)
   if (apiKeyParam !== null) patch.apiKey = apiKeyParam.trim()
   if (apiModeParam === 'images' || apiModeParam === 'responses') patch.apiMode = apiModeParam
   if (modelParam !== null && modelParam.trim()) patch.model = modelParam.trim()

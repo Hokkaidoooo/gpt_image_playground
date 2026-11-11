@@ -1,5 +1,5 @@
 import { MAX_INPUT_IMAGES, type ApiProfile } from '../types'
-import { resolveApiProfileModel } from './apiProfiles'
+import { resolveApiProfileModel } from './imageModels'
 import { createRequestTimeoutError, getApiErrorMessage } from './imageApiShared'
 import { buildImageProviderUrl, createImageProviderHeaders, redactImageProviderError, type ResolvedImageApiDialect } from './imageProviderUrl'
 import { apiFetch } from './platform'

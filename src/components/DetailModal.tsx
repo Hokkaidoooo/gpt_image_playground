@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
 import { useStore, reuseConfig, editOutputs, removeTask, showCodexCliPrompt, getCodexCliPromptKey, retryTask } from '../store'
+import { getTaskRetryAction } from '../lib/taskState'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { useTooltip } from '../hooks/useTooltip'
@@ -444,6 +445,8 @@ export default function DetailModal() {
     setDetailTaskId(null)
   }
 
+  const retryAction = getTaskRetryAction(task, tasks)
+
   return (
     <div
       data-no-drag-select
@@ -829,14 +832,15 @@ export default function DetailModal() {
                         handleRetry()
                       }}
                       className="inline-flex items-center justify-center rounded-full border border-blue-200/80 bg-white/80 px-3 py-1.5 text-blue-500 transition hover:bg-blue-50 dark:border-blue-400/20 dark:bg-white/[0.04] dark:hover:bg-blue-500/10"
-                      aria-label="重试任务"
+                      aria-label={retryAction.label}
+                      disabled={retryAction.disabled}
                     >
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                       </svg>
                     </button>
                     <ViewportTooltip visible={retryTooltip.visible} className="whitespace-nowrap">
-                      重试任务
+                      {retryAction.label}
                     </ViewportTooltip>
                   </div>
                 )}
@@ -856,6 +860,22 @@ export default function DetailModal() {
           </button>
 
           <div data-selectable-text className="flex-1">
+            {task.status === 'done' && Boolean(task.outputErrors?.length || task.retryOfTaskId) && (
+              <button type="button" onClick={handleRetry} disabled={retryAction.disabled} className="mb-4 rounded-xl bg-blue-500 px-3 py-2 text-sm text-white disabled:cursor-default disabled:opacity-50">
+                {retryAction.label}
+              </button>
+            )}
+            {Boolean(task.inputImageAdjustments?.length) && (
+              <div className="mb-4 rounded-xl bg-blue-500/[0.06] p-3 text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+                <p className="mb-1 font-medium">参考图上传处理</p>
+                {task.inputImageAdjustments!.map((adjustment, index) => <p key={index}>{adjustment}</p>)}
+              </div>
+            )}
+            {task.completionError && (
+              <p role="alert" className="mb-4 rounded-xl bg-amber-500/[0.08] p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+                {task.completionError}
+              </p>
+            )}
             {task.localSaveError && (
               <p role="alert" className="mb-4 rounded-xl bg-amber-500/[0.08] p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
                 本机保存未完成，可在这里下载图片。{task.localSaveError}

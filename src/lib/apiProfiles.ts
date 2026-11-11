@@ -27,6 +27,7 @@ import { DEFAULT_IMAGES_MODEL, normalizeModelList, resolveApiProfileModel } from
 import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } from './batchPrompts'
 import { normalizeFontMode } from './fonts'
 import { DEFAULT_PRIVACY_MODE_SHORTCUT, normalizeShortcutSetting } from './keyboardShortcut'
+import { normalizeImageRequestCompatibility } from './imageRequestCompatibility'
 
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const RAW_DEFAULT_API_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL)
@@ -385,6 +386,7 @@ export function createDefaultOpenAIProfile(overrides: Partial<ApiProfile> = {}):
     imageApiDialect: DEFAULT_API_URL_PATCH?.imageApiDialect ?? 'auto',
     imageAspectRatio: DEFAULT_API_URL_PATCH?.imageAspectRatio,
     imageResolution: DEFAULT_API_URL_PATCH?.imageResolution,
+    imageRequestCompatibility: DEFAULT_API_URL_PATCH?.imageRequestCompatibility,
     timeout: DEFAULT_API_TIMEOUT,
     reasoningEffort: DEFAULT_API_URL_PATCH?.reasoningEffort,
     codexCli: DEFAULT_API_URL_PATCH?.codexCli ?? false,
@@ -428,6 +430,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
       imageApiDialect: profile.imageApiDialect,
       imageAspectRatio: profile.imageAspectRatio,
       imageResolution: profile.imageResolution,
+      imageRequestCompatibility: profile.imageRequestCompatibility,
       apiMode: profile.apiMode,
       reasoningEffort: profile.reasoningEffort,
       codexCli: profile.codexCli,
@@ -459,6 +462,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
       imageApiDialect: savedDraft?.imageApiDialect ?? 'auto',
       imageAspectRatio: savedDraft?.imageAspectRatio,
       imageResolution: savedDraft?.imageResolution,
+      imageRequestCompatibility: savedDraft?.imageRequestCompatibility,
     }
   }
 
@@ -483,6 +487,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
       imageApiDialect: savedDraft?.imageApiDialect ?? 'auto',
       imageAspectRatio: savedDraft?.imageAspectRatio,
       imageResolution: savedDraft?.imageResolution,
+      imageRequestCompatibility: savedDraft?.imageRequestCompatibility,
     }
   }
 
@@ -512,6 +517,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
     imageApiDialect: savedDraft?.imageApiDialect ?? 'auto',
     imageAspectRatio: savedDraft?.imageAspectRatio,
     imageResolution: savedDraft?.imageResolution,
+    imageRequestCompatibility: savedDraft?.imageRequestCompatibility,
   }
 }
 
@@ -543,6 +549,7 @@ function normalizeProviderDraft(
     imageApiDialect: normalizeImageApiDialect(input.imageApiDialect),
     imageAspectRatio: typeof input.imageAspectRatio === 'string' ? input.imageAspectRatio.trim() : undefined,
     imageResolution: typeof input.imageResolution === 'string' ? input.imageResolution.trim() : undefined,
+    imageRequestCompatibility: normalizeImageRequestCompatibility(input.imageRequestCompatibility),
     apiMode,
     reasoningEffort: normalizeReasoningEffort(input.reasoningEffort),
     codexCli: typeof input.codexCli === 'boolean' ? input.codexCli : fallback.codexCli,
@@ -605,6 +612,7 @@ export function normalizeApiProfile(
     imageApiDialect: normalizeImageApiDialect(record.imageApiDialect),
     imageAspectRatio: typeof record.imageAspectRatio === 'string' ? record.imageAspectRatio.trim() : undefined,
     imageResolution: typeof record.imageResolution === 'string' ? record.imageResolution.trim() : undefined,
+    imageRequestCompatibility: normalizeImageRequestCompatibility(record.imageRequestCompatibility === undefined ? defaults.imageRequestCompatibility : record.imageRequestCompatibility),
     imageGenerationModel: typeof record.imageGenerationModel === 'string'
       ? record.imageGenerationModel.trim()
       : '',
@@ -968,7 +976,8 @@ function isDefaultOpenAIProfile(profile: ApiProfile): boolean {
     profile.apiProxy === DEFAULT_OPENAI_API_PROXY &&
     profile.streamImages === false &&
     profile.streamPartialImages === DEFAULT_STREAM_PARTIAL_IMAGES &&
-    profile.transparentBackgroundMethod === 'api'
+    profile.transparentBackgroundMethod === 'api' &&
+    profile.imageRequestCompatibility === undefined
 }
 
 function hasOnlyDefaultProfiles(settings: AppSettings): boolean {
@@ -1018,6 +1027,7 @@ function getApiProfileDedupKey(profile: ApiProfile): string {
     profile.imageApiDialect ?? 'auto',
     profile.imageAspectRatio,
     profile.imageResolution,
+    profile.imageRequestCompatibility,
   ])
 }
 
@@ -1032,6 +1042,7 @@ function getApiProfileConnectionKey(profile: ApiProfile): string {
     profile.imageApiDialect ?? 'auto',
     profile.imageAspectRatio,
     profile.imageResolution,
+    profile.imageRequestCompatibility,
   ])
 }
 
@@ -1163,6 +1174,7 @@ const PRESET_PROFILE_DEPLOYMENT_KEYS = [
   'imageApiDialect',
   'imageAspectRatio',
   'imageResolution',
+  'imageRequestCompatibility',
   'timeout',
   'apiMode',
   'reasoningEffort',
@@ -1265,6 +1277,7 @@ export function mergePresetImportedSettings(
 
     const changed: Partial<ApiProfile> = {}
     for (const key of PRESET_PROFILE_DEPLOYMENT_KEYS) {
+      if (key === 'imageRequestCompatibility' && JSON.stringify(matched[key]) !== JSON.stringify(previous[key])) continue
       if (JSON.stringify(importedProfile[key]) !== JSON.stringify(previous[key])) {
         Object.assign(changed, { [key]: importedProfile[key] })
       }

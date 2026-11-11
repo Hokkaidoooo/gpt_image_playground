@@ -5,6 +5,17 @@ import { normalizePersistedState } from './persistedState'
 import { callImageApi } from './api'
 import { maybeAppendImageToolDroppedHint, maybeAppendStreamingHint } from './imageApiShared'
 
+vi.mock('./imageInputPreparation', async () => {
+  const canvas = await import('./canvasImage')
+  return {
+    prepareImageInputs: async (dataUrls: string[], mask?: string) => ({
+      blobs: await Promise.all(dataUrls.map((dataUrl, index) => mask && index === 0 ? canvas.imageDataUrlToPngBlob(dataUrl) : canvas.dataUrlToBlob(dataUrl))),
+      mask: mask ? await canvas.maskDataUrlToPngBlob(mask) : null,
+      adjustments: [],
+    }),
+  }
+})
+
 describe('API error hints', () => {
   it.each([false, true])('uses the transparent background hint when streaming is %s', (streamImages) => {
     const message = 'Transparent background is not supported for this model.'
@@ -216,7 +227,7 @@ describe('callImageApi', () => {
       prompt: 'prompt',
       params: { ...DEFAULT_PARAMS },
       inputImageDataUrls: [],
-    })).rejects.toThrow(/^Tool choice 'required' must be specified with 'tools' parameter\.\n提示：当前使用的 API 可能未正确转发图像生成工具，请尝试更换支持该工具的接口或模型。$/)
+    })).rejects.toThrow(/^HTTP 400：Tool choice 'required' must be specified with 'tools' parameter\.\n提示：当前使用的 API 可能未正确转发图像生成工具，请尝试更换支持该工具的接口或模型。$/)
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)).tool_choice).toBe('required')
@@ -776,7 +787,7 @@ describe('callImageApi', () => {
     })
 
     const result = await callImageApi({
-      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true },
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true, profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({ ...profile, imageRequestCompatibility: { mode: 'standard' } })) },
       prompt: 'prompt',
       params: { ...DEFAULT_PARAMS, n: 3 },
       inputImageDataUrls: [],

@@ -48,11 +48,12 @@ import {
   storeImageWithSize,
 } from './lib/db'
 import { callImageApi } from './lib/api'
+import { normalizeImageRequestCompatibility, usesSequentialImageRequests } from './lib/imageRequestCompatibility'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage } from './lib/agentApi'
 import { buildAgentApiInput, buildAgentContinuationInput } from './lib/agentInputBuilder'
 import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId } from './lib/agentImageReferences'
 import { showBrowserNotification } from './lib/browserNotification'
-import { IMAGE_FETCH_CORS_HINT, isHttpUrl } from './lib/imageApiShared'
+import { IMAGE_FETCH_CORS_HINT, isHttpUrl, type CallApiResult } from './lib/imageApiShared'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
@@ -72,7 +73,7 @@ import { canonicalizeBatchFunctionCallArguments, countResponseToolCalls, createR
 import { cleanStaleAgentInputDrafts, clearInputDraftState, isEmptyAgentInputDraft, normalizeAgentInputDrafts, remapAgentInputDraftMentionsForPathChange, restoreAgentInputDraftState, restoreGalleryInputDraftState, saveActiveAgentInputDrafts, saveGalleryInputDraft, syncActiveInputDraft, updateInputDraftImages } from './lib/inputDraftState'
 import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, createDefaultFavoriteCollection, deleteFavoriteCollectionState, ensureDefaultFavoriteCollection, getTaskFavoriteCollectionIds, mergeFavoriteCollections, normalizeFavoriteCollectionIds, normalizeFavoriteCollectionName, normalizeFavoriteCollections, normalizeFavoritePatch, normalizeLoadedFavoriteState, resolveDefaultFavoriteCollectionId, sameFavoriteCollectionIds } from './lib/favoriteState'
 import { createPersistedState, mergePersistedAgentConversations, migratePersistedState, normalizePersistedState } from './lib/persistedState'
-import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAgentImageActualParams, deriveGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks } from './lib/taskState'
+import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAgentImageActualParams, deriveGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks, getTaskRetryImageCount, getTaskRetryAction } from './lib/taskState'
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
 import { apiFetch, FetchConnectError, isTauri } from './lib/platform'
 import { pickSaveDir, saveFile, saveFileToDir, type SaveOptions } from './lib/saveFile'
@@ -81,6 +82,8 @@ import { throwIfAborted } from './lib/serverSentEvents'
 import { tauriStorage } from './lib/tauriStorage'
 import { hasLocalImageBridge, LocalImageSaveError, localImageRecord, saveLocalGeneratedImages } from './lib/localRuntime'
 import { createPrivacyModeState, getPrivacySnapshotImageIds, isPrivacyHiddenConversation, isPrivacyHiddenTask, restorePrivacyInputState, type PrivacyModeState } from './lib/privacyMode'
+
+export { getTaskRetryImageCount, getTaskRetryLabel, getTaskRetryAction } from './lib/taskState'
 
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
@@ -1341,7 +1344,11 @@ export function getTaskApiProfile(settings: AppSettings, task: TaskRecord): ApiP
   if (!task.apiProfileId) return null
   const profile = normalized.profiles.find((item) => item.id === task.apiProfileId)
   // 任务记录的模型仍在配置的模型列表中时，沿用任务提交时的模型
-  return profile ? resolveApiProfileModel(profile, task.apiModel) : null
+  if (!profile) return null
+  const resolved = resolveApiProfileModel(profile, task.apiModel)
+  return task.imageRequestCompatibility
+    ? { ...resolved, imageRequestCompatibility: normalizeImageRequestCompatibility(task.imageRequestCompatibility) }
+    : resolved
 }
 
 function createSettingsForApiProfile(settings: AppSettings, profile: ApiProfile): AppSettings {
@@ -1926,6 +1933,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       imageApiDialect: activeProfile.imageApiDialect,
       imageAspectRatio: activeProfile.imageAspectRatio,
       imageResolution: activeProfile.imageResolution,
+      imageRequestCompatibility: normalizeImageRequestCompatibility(activeProfile.imageRequestCompatibility ?? { mode: 'auto' }),
       inputImageIds: orderedInputImages.map((i) => i.id),
       maskTargetImageId,
       maskImageId,
@@ -2947,6 +2955,7 @@ async function executeAgentRound(
         imageApiDialect: imageProfile.imageApiDialect,
         imageAspectRatio: imageProfile.imageAspectRatio,
         imageResolution: imageProfile.imageResolution,
+        imageRequestCompatibility: normalizeImageRequestCompatibility(imageProfile.imageRequestCompatibility ?? { mode: 'auto' }),
         inputImageIds,
         maskTargetImageId: options.maskTargetImageId !== undefined ? options.maskTargetImageId : round.maskTargetImageId ?? null,
         maskImageId: options.maskImageId !== undefined ? options.maskImageId : round.maskImageId ?? null,
@@ -3169,6 +3178,11 @@ async function executeAgentRound(
         inputImageDataUrls: opts.referenceImageDataUrls,
         inputImageUrls: opts.referenceImageSourceUrls,
         skipCodexCliSizePrompt: true,
+        shouldContinue: () => !opts.signal.aborted && useStore.getState().tasks.some((item) => item.id === opts.taskId && item.status === 'running'),
+        onInputImagesPrepared: async (inputImageAdjustments) => {
+          if (opts.signal.aborted) return
+          await updateTaskInStore(opts.taskId, { inputImageAdjustments })
+        },
         onPartialImage: opts.onPartialImage
           ? (partial) => {
               void opts.onPartialImage?.({ image: partial.image, partialImageIndex: partial.partialImageIndex ?? partial.requestIndex })
@@ -3549,6 +3563,7 @@ async function executeAgentRound(
           imageApiDialect: imageProfile.imageApiDialect,
           imageAspectRatio: imageProfile.imageAspectRatio,
           imageResolution: imageProfile.imageResolution,
+          imageRequestCompatibility: normalizeImageRequestCompatibility(imageProfile.imageRequestCompatibility ?? { mode: 'auto' }),
           inputImageIds: uniqueIds([...(round?.inputImageIds ?? []), ...promptRefs.imageIds]),
           maskTargetImageId: round?.maskTargetImageId ?? null,
           maskImageId: round?.maskImageId ?? null,
@@ -3866,7 +3881,8 @@ async function executeTask(taskId: string) {
   if (
     taskProvider !== 'fal' &&
     !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0) &&
-    !usesConcurrentImageRequests(requestSettings, activeProfile, task.params, task.inputImageIds.length > 0)
+    !usesConcurrentImageRequests(requestSettings, activeProfile, task.params, task.inputImageIds.length > 0) &&
+    !usesSequentialImageRequests(activeProfile, task.params.n)
   ) {
     scheduleOpenAIWatchdog(taskId, activeProfile.timeout, activeProfile)
   }
@@ -3889,6 +3905,49 @@ async function executeTask(taskId: string) {
       ? task.transparentPrompt
       : task.prompt
 
+    let storedOutputs: Awaited<ReturnType<typeof storeTaskOutputImages>> | undefined
+    const shouldContinue = () => taskExecutions.get(taskId) === execution && useStore.getState().tasks.some((item) => item.id === taskId && item.status === 'running')
+    const storeOutputs = async (images: string[]) => {
+      const stored = await storeTaskOutputImages(task, images)
+      const previous = storedOutputs
+      storedOutputs = {
+        outputIds: [...(previous?.outputIds ?? []), ...stored.outputIds],
+        outputDataUrls: [...(previous?.outputDataUrls ?? []), ...stored.outputDataUrls],
+        outputImageSizes: [...(previous?.outputImageSizes ?? []), ...stored.outputImageSizes],
+        transparentOriginalImageIds: previous?.transparentOriginalImageIds || stored.transparentOriginalImageIds
+          ? [...(previous?.transparentOriginalImageIds ?? []), ...(stored.transparentOriginalImageIds ?? [])]
+          : undefined,
+        localSaveError: [previous?.localSaveError, stored.localSaveError].filter(Boolean).join('\n') || undefined,
+      }
+      return stored
+    }
+    const persistCompletedRequest = async (result: CallApiResult, requestIndex: number) => {
+      if (!shouldContinue()) return
+      clearOpenAIWatchdogTimer(taskId)
+      const stored = await storeOutputs(result.images)
+      if (!shouldContinue()) {
+        await deleteUnreferencedImageIds([...stored.outputIds, ...(stored.transparentOriginalImageIds ?? [])])
+        return
+      }
+      const current = useStore.getState().tasks.find((item) => item.id === taskId)!
+      const actualParamsList = await resolveImageSizeParamsList(stored.outputDataUrls, result.actualParamsList, stored.outputImageSizes)
+      if (!shouldContinue()) {
+        await deleteUnreferencedImageIds([...stored.outputIds, ...(stored.transparentOriginalImageIds ?? [])])
+        return
+      }
+      const completed = requestIndex + result.images.length
+      await updateTaskInStore(taskId, {
+        outputImages: storedOutputs!.outputIds,
+        transparentOriginalImages: storedOutputs!.transparentOriginalImageIds,
+        localSaveError: storedOutputs!.localSaveError,
+        actualParams: deriveGalleryActualParams(taskProvider, false, result.actualParams, actualParamsList, storedOutputs!.outputIds.length),
+        actualParamsByImage: { ...current.actualParamsByImage, ...mapActualParamsByImage(stored.outputIds, actualParamsList) },
+        revisedPromptByImage: { ...current.revisedPromptByImage, ...mapRevisedPromptsByImage(stored.outputIds, result.revisedPrompts) },
+        outputErrors: Array.from({ length: Math.max(0, task.params.n - completed) }, (_, offset) => ({ requestIndex: completed + offset, error: '尚未完成；中断后可补齐。' })),
+      })
+      if (stored.localSaveError) throw new Error(stored.localSaveError)
+    }
+
     const result = await callImageApi({
       settings: requestSettings,
       prompt: replaceImageMentionsForApi(requestPrompt, inputDataUrls.length),
@@ -3898,6 +3957,11 @@ async function executeTask(taskId: string) {
       inputImageUrls: task.inputImageIds.map((id) => useStore.getState().imageSourceUrls[id] ?? null),
       maskDataUrl,
       skipCodexCliSizePrompt: task.sourceMode === 'agent',
+      shouldContinue,
+      onInputImagesPrepared: async (inputImageAdjustments) => {
+        if (shouldContinue()) await updateTaskInStore(taskId, { inputImageAdjustments })
+      },
+      onRequestCompleted: persistCompletedRequest,
       onFalRequestEnqueued: (request) => {
         if (taskExecutions.get(taskId) !== execution) return
         falRequestInfo = request
@@ -3929,8 +3993,11 @@ async function executeTask(taskId: string) {
       return
     }
 
-    // 存储输出图片
-    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, localSaveError } = await storeTaskOutputImages(task, result.images)
+    // 供应商响应已完成，图片落盘不计入网络请求期限。
+    clearOpenAIWatchdogTimer(taskId)
+    const storedCount = storedOutputs?.outputIds.length ?? 0
+    if (!storedOutputs || result.images.length > storedCount) await storeOutputs(result.images.slice(storedCount))
+    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, localSaveError } = storedOutputs!
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const actualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,
@@ -3966,20 +4033,30 @@ async function executeTask(taskId: string) {
     const partialImageIdsToClean = latestBeforeUpdate.streamPartialImageIds || []
     clearOpenAIWatchdogTimer(taskId)
     useStore.getState().setTaskStreamPreview(taskId)
-    updateTaskInStore(taskId, {
-      outputImages: outputIds,
-      localSaveError,
-      transparentOriginalImages: transparentOriginalImageIds,
-      outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
-      streamPartialImageIds: undefined,
-      rawImageUrls: result.rawImageUrls?.length ? result.rawImageUrls : undefined,
-      actualParams,
-      actualParamsByImage,
-      revisedPromptByImage,
-      ...createTaskDonePatch(task, Date.now()),
-      falRecoverable: false,
-      customRecoverable: false,
-    })
+    let completionError = result.completionError
+    try {
+      await updateTaskInStore(taskId, {
+        outputImages: outputIds,
+        localSaveError,
+        transparentOriginalImages: transparentOriginalImageIds,
+        outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
+        completionError: result.completionError,
+        inputImageAdjustments: result.inputImageAdjustments,
+        streamPartialImageIds: undefined,
+        rawImageUrls: result.rawImageUrls?.length ? result.rawImageUrls : undefined,
+        actualParams,
+        actualParamsByImage,
+        revisedPromptByImage,
+        ...createTaskDonePatch(task, Date.now()),
+        falRecoverable: false,
+        customRecoverable: false,
+      })
+    } catch (err) {
+      const message = `图片已生成，但任务记录保存失败：${err instanceof Error ? err.message : String(err)}`
+      completionError = [completionError, message].filter(Boolean).join('\n')
+      console.error(message, err)
+      useStore.getState().setTasks(useStore.getState().tasks.map((item) => item.id === taskId ? { ...item, completionError } : item))
+    }
     void deleteUnreferencedImageIds(partialImageIdsToClean)
 
     const failedCount = result.failedRequests?.length ?? 0
@@ -3988,7 +4065,7 @@ async function executeTask(taskId: string) {
       : `生成完成，共 ${outputIds.length} 张图片`
     // 批量任务只在整批结束时统一提示
     if (!batchTaskIds.has(taskId) && !isTaskHiddenByPrivacyMode(task)) {
-      useStore.getState().showToast(localSaveError || completionMessage, localSaveError || failedCount > 0 ? 'error' : 'success')
+      useStore.getState().showToast(completionError || localSaveError || completionMessage, completionError || localSaveError || failedCount > 0 ? 'error' : 'success')
       if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `${completionMessage}。`)
     }
     const currentMask = useStore.getState().maskDraft
@@ -4068,7 +4145,7 @@ export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
   const task = updated.find((t) => t.id === taskId)
   setTasks(updated)
   maybeOpenSupportPrompt(tasks, updated, taskId)
-  if (task) putTask(task)
+  if (task) return putTask(task)
 }
 
 export function createFavoriteCollection(name: string) {
@@ -4163,10 +4240,15 @@ export async function deleteFavoriteCollection(collectionId: string, deleteTasks
 /** 按重试方式新建任务或覆盖原任务；Agent 对话中的任务始终新建 */
 export async function retryTask(task: TaskRecord) {
   const { settings, tasks } = useStore.getState()
-  const source = tasks.find((item) => item.id === task.id)
-  if (!source || source.status === 'running' || source.falRecoverable || source.customRecoverable) return
+  const original = tasks.find((item) => item.id === task.id)
+  if (!original) return
+  const action = getTaskRetryAction(original, tasks)
+  if (action.disabled) return
+  const source = action.task
   const activeProfile = getActiveApiProfile(settings)
-  const normalizedParams = normalizeParamsForSettings(source.params, settings, { hasInputImages: source.inputImageIds.length > 0 })
+  const remainingCount = getTaskRetryImageCount(source)
+  const isPartialRetry = Boolean(source.retryOfTaskId) || source.id !== original.id || (source.outputImages.length > 0 && taskHasOutputErrors(source))
+  const normalizedParams = normalizeParamsForSettings({ ...source.params, n: remainingCount }, settings, { hasInputImages: source.inputImageIds.length > 0 })
   const shouldUseTransparentOutput = (normalizedParams.output_format === 'png' || normalizedParams.output_format === 'webp') && normalizedParams.transparent_output
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
@@ -4174,7 +4256,7 @@ export async function retryTask(task: TaskRecord) {
   const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
     ? createTransparentOutputMeta(source.prompt.trim())
     : null
-  const overwrite = !isAgentTask(source) && (
+  const overwrite = !isPartialRetry && !isAgentTask(source) && (
     settings.retryMode === 'overwriteAll' || (settings.retryMode === 'overwriteFailed' && source.status === 'error')
   )
   const taskId = overwrite ? source.id : genId()
@@ -4182,6 +4264,7 @@ export async function retryTask(task: TaskRecord) {
   const newTask: TaskRecord = {
     ...(overwrite ? source : {}),
     id: taskId,
+    retryOfTaskId: isPartialRetry ? source.id : undefined,
     prompt: source.prompt,
     params: taskParams,
     apiProvider: activeProfile.provider,
@@ -4193,6 +4276,7 @@ export async function retryTask(task: TaskRecord) {
     imageApiDialect: activeProfile.imageApiDialect,
     imageAspectRatio: activeProfile.imageAspectRatio,
     imageResolution: activeProfile.imageResolution,
+    imageRequestCompatibility: normalizeImageRequestCompatibility(activeProfile.imageRequestCompatibility ?? { mode: 'auto' }),
     inputImageIds: [...source.inputImageIds],
     maskTargetImageId: source.maskTargetImageId ?? null,
     maskImageId: source.maskImageId ?? null,
@@ -4200,6 +4284,8 @@ export async function retryTask(task: TaskRecord) {
     transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
     outputErrors: undefined,
+    completionError: undefined,
+    inputImageAdjustments: undefined,
     localSaveError: undefined,
     transparentOriginalImages: undefined,
     actualParams: undefined,
@@ -4242,6 +4328,7 @@ export async function retryTask(task: TaskRecord) {
     ])
   }
 
+  if (isPartialRetry) useStore.getState().showToast(`补齐剩余${remainingCount}张，已完成图片保留在原任务`, 'info')
   executeTask(taskId)
 }
 

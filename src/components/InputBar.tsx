@@ -6,6 +6,7 @@ import { getActiveAgentRounds } from '../lib/agentConversationState'
 import { getActiveApiProfile, getAgentImageApiProfile, normalizeSettings, resolveApiProfileModel, splitModelList } from '../lib/apiProfiles'
 import { getImageGenerationModel, isGptImage25Model } from '../lib/imageModels'
 import { getImageProviderCapabilities } from '../lib/imageProvider'
+import { resolveImageRequestCompatibility, usesSequentialImageRequests } from '../lib/imageRequestCompatibility'
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
 import { splitBatchPrompts } from '../lib/batchPrompts'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, normalizeParamsForSettings } from '../lib/paramCompatibility'
@@ -540,20 +541,23 @@ export default function InputBar() {
   const activeProvider = activeProfile.provider
   const isFalProvider = activeProvider === 'fal'
   const agentAutoImageCount = appMode === 'agent'
-  const moderationDisabled = isFalProvider || nativeParameters
+  const requestCompatibility = resolveImageRequestCompatibility(activeProfile)
+  const moderationDisabled = isFalProvider || nativeParameters || requestCompatibility.omitParameters.includes('moderation')
   const transparentOutputAvailable = appMode === 'gallery' && !nativeParameters
   const showTransparentOutputControl = transparentOutputAvailable && (params.output_format === 'png' || params.output_format === 'webp')
   const transparentOutputEnabled = transparentOutputAvailable && showTransparentOutputControl && params.transparent_output
-  const compressionDisabled = params.output_format === 'png' || isFalProvider || nativeParameters
+  const compressionDisabled = params.output_format === 'png' || isFalProvider || nativeParameters || requestCompatibility.omitParameters.includes('output_compression')
   const outputImageLimit = imageCapabilities.maxOutputImages
   const isFalTextToImage = isFalProvider && inputImages.length === 0
   const nDraftValue = Number(nInput)
   const effectiveNValue = Number.isNaN(nDraftValue) ? params.n : nDraftValue
-  const streamConcurrentByN = activeProfile.provider === 'openai' && !nativeParameters && activeProfile.streamImages === true && !agentAutoImageCount && effectiveNValue > 1
+  const streamConcurrentByN = activeProfile.provider === 'openai' && !nativeParameters && activeProfile.streamImages === true && !agentAutoImageCount && effectiveNValue > 1 && !usesSequentialImageRequests(activeProfile, effectiveNValue)
   const nLimitHintText = agentAutoImageCount
     ? 'Agent 模式下数量由模型根据提示词自动决定'
     : isFalProvider
     ? `fal.ai 最大请求数量为 ${outputImageLimit}`
+    : requestCompatibility.mode !== 'standard'
+    ? `最多生成 ${outputImageLimit} 张；每次请求 ${requestCompatibility.maxImagesPerRequest} 张，按顺序完成`
     : `当前图片接口每次最多请求 ${outputImageLimit} 张`
   const displaySize = isFalTextToImage && params.size === 'auto'
     ? DEFAULT_FAL_IMAGE_SIZE
@@ -579,8 +583,8 @@ export default function InputBar() {
   }, [transparentOutputHint.hide])
   const compressionHint = useHintTooltip({ enabled: () => compressionDisabled })
   const moderationHint = useHintTooltip({ enabled: () => moderationDisabled })
-  const sizeHint = useHintTooltip({ enabled: () => isFalTextToImage || activeProfile.codexCli })
-  const qualityHint = useHintTooltip({ enabled: () => activeProfile.codexCli || isFalProvider })
+  const sizeHint = useHintTooltip({ enabled: () => isFalTextToImage || activeProfile.codexCli || requestCompatibility.omitParameters.includes('size') })
+  const qualityHint = useHintTooltip({ enabled: () => activeProfile.codexCli || isFalProvider || requestCompatibility.omitParameters.includes('quality') })
   const nLimitHint = useHintTooltip({ autoHideMs: 2000 })
   const streamConcurrentHint = useHintTooltip({ enabled: () => streamConcurrentByN })
   const maskTargetImage = maskDraft

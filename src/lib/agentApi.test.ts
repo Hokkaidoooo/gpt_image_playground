@@ -56,7 +56,7 @@ describe('callBatchImageSingle', () => {
     expect(result).toMatchObject({
       batchItemId: 'image_1',
       image: null,
-      error: "Tool choice 'required' must be specified with 'tools' parameter.\n提示：当前使用的 API 可能未正确转发图像生成工具，请尝试更换支持该工具的接口或模型。",
+      error: "HTTP 400：Tool choice 'required' must be specified with 'tools' parameter.\n提示：当前使用的 API 可能未正确转发图像生成工具，请尝试更换支持该工具的接口或模型。",
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })

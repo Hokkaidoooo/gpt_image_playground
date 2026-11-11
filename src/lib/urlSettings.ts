@@ -1,5 +1,6 @@
 import type { ApiMode, ApiProfile, AppSettings } from '../types'
 import { normalizeImageProviderBaseUrl } from './imageProviderUrl'
+import { normalizeImageRequestCompatibility, parseImageRequestCompatibilityParam } from './imageRequestCompatibility'
 import {
   createDefaultOpenAIProfile,
   DEFAULT_IMAGES_MODEL,
@@ -14,7 +15,7 @@ import {
 } from './apiProfiles'
 import { isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile } from './presetConfig'
 
-const URL_SETTING_KEYS = ['settings', 'profileId', 'apiUrl', 'apiKey', 'codexCli', 'apiMode', 'model', 'imageGenerationModel', 'imageApiDialect', 'imageAspectRatio', 'imageResolution', 'profileName', 'reasoningEffort', 'streamImages', 'streamPartialImages', 'transparentBackgroundMethod']
+const URL_SETTING_KEYS = ['settings', 'profileId', 'apiUrl', 'apiKey', 'codexCli', 'apiMode', 'model', 'imageGenerationModel', 'imageApiDialect', 'imageAspectRatio', 'imageResolution', 'imageRequestCompatibility', 'profileName', 'reasoningEffort', 'streamImages', 'streamPartialImages', 'transparentBackgroundMethod']
 
 function getProfileDedupKey(profile: ApiProfile) {
   return JSON.stringify([
@@ -33,6 +34,7 @@ function getProfileDedupKey(profile: ApiProfile) {
     profile.imageApiDialect ?? 'auto',
     profile.imageAspectRatio,
     profile.imageResolution,
+    profile.imageRequestCompatibility,
   ])
 }
 
@@ -49,10 +51,12 @@ function imageSettingsFromParams(params: URLSearchParams): Partial<ApiProfile> {
   const dialect = params.get('imageApiDialect')
   const ratio = params.get('imageAspectRatio')
   const resolution = params.get('imageResolution')
+  const compatibility = params.get('imageRequestCompatibility')
   return {
     ...(dialect !== null ? { imageApiDialect: normalizeImageApiDialect(dialect) } : {}),
     ...(ratio !== null ? { imageAspectRatio: ratio.trim() } : {}),
     ...(resolution !== null ? { imageResolution: resolution.trim() } : {}),
+    ...(compatibility !== null ? { imageRequestCompatibility: parseImageRequestCompatibilityParam(compatibility) } : {}),
   }
 }
 
@@ -192,6 +196,7 @@ function buildPresetConfigOnlySettingsFromUrlParams(currentSettings: Partial<App
           if (matched.imageApiDialect !== undefined) patch.imageApiDialect = normalizeImageApiDialect(matched.imageApiDialect)
           if (typeof matched.imageAspectRatio === 'string') patch.imageAspectRatio = matched.imageAspectRatio.trim()
           if (typeof matched.imageResolution === 'string') patch.imageResolution = matched.imageResolution.trim()
+          if (matched.imageRequestCompatibility !== undefined) patch.imageRequestCompatibility = normalizeImageRequestCompatibility(matched.imageRequestCompatibility)
           if (typeof matched.timeout === 'number' && Number.isFinite(matched.timeout)) patch.timeout = matched.timeout
           if (typeof matched.apiProxy === 'boolean') patch.apiProxy = matched.apiProxy
           if (matched.responseFormatB64Json === true) patch.responseFormatB64Json = true

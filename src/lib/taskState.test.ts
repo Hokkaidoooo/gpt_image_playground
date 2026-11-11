@@ -11,6 +11,7 @@ import {
   mapActualParamsByImage,
   mapRevisedPromptsByImage,
   markInterruptedOpenAIRunningTasks,
+  getTaskRetryAction,
 } from './taskState'
 
 function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
@@ -30,6 +31,24 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
 }
 
 describe('task lifecycle patches', () => {
+  it('keeps completed images downloadable after interruption and tracks remaining slots', () => {
+    const source = task({ status: 'running', params: { ...DEFAULT_PARAMS, n: 3 }, outputImages: ['finished-image'] })
+    const restored = markInterruptedOpenAIRunningTasks([source], 4000).tasks[0]
+    expect(restored.status).toBe('done')
+    expect(restored.outputImages).toEqual(['finished-image'])
+    expect(restored.completionError).toContain('生成中断')
+    expect(restored.outputErrors?.map((item) => item.requestIndex)).toEqual([1, 2])
+  })
+
+  it('resolves continuation status from one parent relationship and rejects cycles', () => {
+    const source = task({ id: 'source', params: { ...DEFAULT_PARAMS, n: 3 }, outputImages: ['first'], outputErrors: [{ requestIndex: 1, error: '524' }, { requestIndex: 2, error: '未发送' }] })
+    const retry = task({ id: 'retry', retryOfTaskId: source.id, params: { ...DEFAULT_PARAMS, n: 2 }, status: 'running' })
+    expect(getTaskRetryAction(source, [source, retry])).toMatchObject({ label: '正在补齐图片', disabled: true })
+    expect(getTaskRetryAction(source, [source, { ...retry, status: 'done' }])).toMatchObject({ label: '补齐已完成', disabled: true })
+    expect(getTaskRetryAction(source, [source, { ...retry, status: 'error' }])).toMatchObject({ task: { id: 'retry' }, label: '补齐剩余2张', disabled: false })
+    const cyclicSource = { ...source, retryOfTaskId: retry.id }
+    expect(getTaskRetryAction(cyclicSource, [cyclicSource, retry])).toMatchObject({ label: '补齐任务关联异常', disabled: true })
+  })
   it('derives done and error terminal fields from the caller time', () => {
     const source = task({ createdAt: 1_000 })
 

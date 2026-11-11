@@ -4,6 +4,7 @@ import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } fro
 import { isTauri } from '../../lib/platform'
 import { dismissAllTooltips } from '../../lib/tooltipDismiss'
 import { getImageProviderCapabilities } from '../../lib/imageProvider'
+import { resolveImageRequestCompatibility, usesSequentialImageRequests } from '../../lib/imageRequestCompatibility'
 import Select from '../Select'
 import { ImageParameterControls } from '../settings/ImageModelsPanel'
 import ButtonTooltip from './buttonTooltip'
@@ -199,13 +200,16 @@ export default function InputParamsPanel({
   onStopBatch: () => void
 }) {
   const nativeParameters = getImageProviderCapabilities(activeProfile).nativeParameters
+  const compatibility = resolveImageRequestCompatibility(activeProfile)
+  const omitted = compatibility.omitParameters
+  const sequential = !agentAutoImageCount && usesSequentialImageRequests(activeProfile, params.n)
   // 折叠时也展示弹层内每一项的当前值，不支持的参数不显示
   const moreSummary = [
-    params.output_format.toUpperCase(),
+    omitted.includes('output_format') ? '格式默认' : params.output_format.toUpperCase(),
     showTransparentOutputControl
       ? `透明 ${transparentOutputEnabled}`
       : compressionDisabled ? null : `压缩 ${outputCompressionInput || '默认'}`,
-    moderationDisabled ? null : `审核 ${params.moderation}`,
+    omitted.includes('moderation') ? '审核默认' : moderationDisabled ? null : `审核 ${params.moderation}`,
   ].filter(Boolean).join(' · ')
   const prefix = (text: string) => <span className="mr-1.5 text-gray-400 dark:text-gray-500">{text}</span>
 
@@ -241,14 +245,15 @@ export default function InputParamsPanel({
         <button
           type="button"
           onClick={() => { dismissAllTooltips(); onOpenSizePicker() }}
-          className={`flex w-full items-center ${CHIP_CLASS}`}
+          disabled={omitted.includes('size')}
+          className={`flex w-full items-center ${omitted.includes('size') ? CHIP_DISABLED_CLASS : CHIP_CLASS}`}
         >
           {prefix('尺寸')}
-          <span className="font-mono">{displaySize}</span>
+          <span className="font-mono">{omitted.includes('size') ? '供应商默认' : displaySize}</span>
         </button>
         <ButtonTooltip
-          visible={(isFalTextToImage || activeProfile.codexCli) && sizeHint.visible}
-          text={isFalTextToImage
+          visible={(isFalTextToImage || activeProfile.codexCli || omitted.includes('size')) && sizeHint.visible}
+          text={omitted.includes('size') ? '尺寸使用供应商默认值，可在设置中调整接口兼容性' : isFalTextToImage
             ? <>fal.ai 的文生图模式不支持 <code className="rounded bg-white/10 px-1 py-0.5 font-mono">auto</code> 参数</>
             : 'Codex CLI 不支持尺寸参数，此处设置仅基于提示词工程'}
         />
@@ -263,19 +268,19 @@ export default function InputParamsPanel({
         onClick={qualityHint.show}
       >
         <Select
-          value={activeProfile.codexCli ? 'auto' : isFalProvider && params.quality === 'auto' ? 'high' : params.quality}
+          value={omitted.includes('quality') ? 'default' : activeProfile.codexCli ? 'auto' : isFalProvider && params.quality === 'auto' ? 'high' : params.quality}
           onChange={(val) => {
             if (!activeProfile.codexCli) setParams({ quality: val as TaskParams['quality'] })
           }}
-          options={qualityOptions}
-          disabled={activeProfile.codexCli}
+          options={omitted.includes('quality') ? [{ label: '供应商默认', value: 'default' }] : qualityOptions}
+          disabled={activeProfile.codexCli || omitted.includes('quality')}
           prefix={prefix('质量')}
           menuClassName="min-w-max"
-          className={activeProfile.codexCli ? CHIP_DISABLED_CLASS : CHIP_CLASS}
+          className={activeProfile.codexCli || omitted.includes('quality') ? CHIP_DISABLED_CLASS : CHIP_CLASS}
         />
         <ButtonTooltip
-          visible={(activeProfile.codexCli || isFalProvider) && qualityHint.visible}
-          text={isFalProvider ? <>fal.ai 不支持 <code className="rounded bg-white/10 px-1 py-0.5 font-mono">auto</code> 质量参数</> : 'Codex CLI 不支持质量参数'}
+          visible={(activeProfile.codexCli || isFalProvider || omitted.includes('quality')) && qualityHint.visible}
+          text={omitted.includes('quality') ? '画质使用供应商默认值，可在设置中调整接口兼容性' : isFalProvider ? <>fal.ai 不支持 <code className="rounded bg-white/10 px-1 py-0.5 font-mono">auto</code> 质量参数</> : 'Codex CLI 不支持质量参数'}
         />
       </div>
       </>}
@@ -319,6 +324,7 @@ export default function InputParamsPanel({
           className="bg-transparent text-xs focus:outline-none disabled:cursor-not-allowed [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
         />
         <ButtonTooltip visible={nLimitHint.visible} text={nLimitHintText} />
+        {sequential && <span className="ml-1.5 text-gray-400" title={`每次生成 ${compatibility.maxImagesPerRequest} 张，完成后继续下一批`}>{compatibility.maxImagesPerRequest === 1 ? '逐张' : '分批'}</span>}
         <ButtonTooltip visible={streamConcurrentByN && streamConcurrentHint.visible && !nLimitHint.visible} text="数量大于 1 时会将多图生成拆分为并发单图" />
       </label>
       {!nativeParameters && <ParamPopoverChip label="更多" summary={moreSummary} className="sm:min-w-[5rem]">
@@ -326,7 +332,7 @@ export default function InputParamsPanel({
               <span className={ROW_LABEL_CLASS}>格式</span>
               <div className="w-28">
                 <Select
-                  value={params.output_format}
+                  value={omitted.includes('output_format') ? 'default' : params.output_format}
                   onChange={(val) => {
                     setParams({
                       output_format: val as TaskParams['output_format'],
@@ -334,7 +340,8 @@ export default function InputParamsPanel({
                       ...(val === 'jpeg' ? { transparent_output: false } : {}),
                     })
                   }}
-                  options={[
+                  disabled={omitted.includes('output_format')}
+                  options={omitted.includes('output_format') ? [{ label: '供应商默认', value: 'default' }] : [
                     { label: 'PNG', value: 'png' },
                     { label: 'JPEG', value: 'jpeg' },
                     { label: 'WebP', value: 'webp' },
@@ -422,11 +429,11 @@ export default function InputParamsPanel({
               <span className={ROW_LABEL_CLASS}>审核</span>
               <div className="w-28">
                 <Select
-                  value={moderationDisabled ? 'auto' : params.moderation}
+                  value={omitted.includes('moderation') ? 'default' : moderationDisabled ? 'auto' : params.moderation}
                   onChange={(val) => {
                     if (!moderationDisabled) setParams({ moderation: val as TaskParams['moderation'] })
                   }}
-                  options={[
+                  options={omitted.includes('moderation') ? [{ label: '供应商默认', value: 'default' }] : [
                     { label: 'auto', value: 'auto' },
                     { label: 'low', value: 'low' },
                   ]}
@@ -436,7 +443,7 @@ export default function InputParamsPanel({
               </div>
               <ButtonTooltip
                 visible={moderationDisabled && moderationHint.visible}
-                text="fal.ai 不支持审核参数"
+                text={omitted.includes('moderation') ? '该接口使用供应商默认审核设置，可在设置中调整接口兼容性' : '当前接口不支持审核参数'}
               />
             </div>
       </ParamPopoverChip>}

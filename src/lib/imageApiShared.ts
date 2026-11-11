@@ -24,12 +24,18 @@ export interface CallApiOptions {
   inputImageUrls?: (string | null)[]
   maskDataUrl?: string
   skipCodexCliSizePrompt?: boolean
+  shouldContinue?: () => boolean
+  onInputImagesPrepared?: (adjustments: string[]) => void | Promise<void>
+  onRequestCompleted?: (result: CallApiResult, requestIndex: number) => Promise<void>
   onFalRequestEnqueued?: (request: { requestId: string; endpoint: string }) => void
   onCustomTaskEnqueued?: (task: { taskId: string }) => void
   onPartialImage?: (partial: { image: string; partialImageIndex?: number; requestIndex?: number }) => void
 }
 
 export interface CallApiResult {
+  /** 已取得图片，但结果数量或保存过程需要用户处理。 */
+  completionError?: string
+  inputImageAdjustments?: string[]
   /** base64 data URL 列表 */
   images: string[]
   /** API 返回的实际生效参数 */
@@ -40,7 +46,7 @@ export interface CallApiResult {
   revisedPrompts?: Array<string | undefined>
   /** API 返回的原始图片 HTTP URL（非 base64 时记录） */
   rawImageUrls?: string[]
-  /** 并发多图请求中失败的单张请求 */
+  /** 按目标图片槽位记录失败或尚未发送的请求。 */
   failedRequests?: Array<{ requestIndex: number; error: string }>
 }
 
@@ -205,23 +211,46 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
 }
 
 export async function getApiErrorMessage(response: Response): Promise<string> {
-  let errorMsg = `HTTP ${response.status}`
-  const textResponse = response.clone()
+  let text: string
   try {
-    const errJson = await response.json()
-    if (errJson.error?.message) errorMsg = errJson.error.message
-    else if (typeof errJson.detail === 'string') errorMsg = errJson.detail
-    else if (Array.isArray(errJson.detail)) errorMsg = errJson.detail.map((item: unknown) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
-    else if (typeof errJson.error === 'string') errorMsg = errJson.error
-    else if (errJson.message) errorMsg = errJson.message
-  } catch {
-    try {
-      errorMsg = await textResponse.text()
-    } catch {
-      /* ignore */
-    }
+    text = await response.text()
+  } catch (error) {
+    return `HTTP ${response.status}：无法读取供应商错误响应：${error instanceof Error ? error.message : String(error)}`
   }
-  return errorMsg
+  let payload: unknown
+  try {
+    payload = JSON.parse(text)
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error
+  }
+  const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+  const error = record.error && typeof record.error === 'object' ? record.error as Record<string, unknown> : {}
+  const candidates = [error.message, record.detail, record.error, record.message]
+  const detail = candidates.find((value) => typeof value === 'string' && value.trim())
+  const details = Array.isArray(record.detail)
+    ? record.detail.map((item) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
+    : undefined
+  const message = typeof detail === 'string' ? detail : details || text.trim()
+  const readable = /<(?:!doctype|html|head|body)\b/i.test(message)
+    ? message.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 600)
+    : message
+  let hint = ''
+  if (response.status === 524 || /error code:\s*524/i.test(message)) {
+    hint = '供应商网关等待生成结果超时。请先查看供应商调用记录，确认本次结果后再决定是否重试；本机延长超时无法改变网关限制。'
+  } else if ([502, 503, 504].includes(response.status)) {
+    hint = '供应商服务或上游暂时不可用。请稍后查看供应商调用记录；本次不会自动重发。'
+  } else if (response.status === 429) {
+    hint = '供应商限流或额度不足。请检查余额、配额及并发限制，稍后再提交。'
+  } else if (response.status === 401) {
+    hint = '供应商身份验证失败。请检查当前配置的 API Key 和接口地址是否属于同一供应商。'
+  } else if (response.status === 403) {
+    hint = '供应商拒绝访问。请检查密钥权限、模型访问权限或站点访问限制。'
+  } else if (/n must be between|number of images.*(?:limit|between)|n.*must.*(?:less|maximum)/i.test(message)) {
+    hint = '供应商不支持本次生成张数。请在兼容设置中降低每次请求张数，按顺序分批生成。'
+  } else if (error.code === 'unsupported_backend_parameter' || /cannot honor moderation/i.test(message)) {
+    hint = '供应商后端不支持该参数。请在兼容设置中使用供应商默认参数，或选择支持该选项的接口。'
+  }
+  return [`HTTP ${response.status}${readable ? `：${readable}` : ''}`, hint].filter(Boolean).join('\n')
 }
 
 export function pickActualParams(source: unknown): Partial<TaskParams> {
