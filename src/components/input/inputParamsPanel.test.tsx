@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS, type ApiProfile } from '../../types'
 import { createDefaultOpenAIProfile } from '../../lib/apiProfiles'
 import { getImageProviderCapabilities } from '../../lib/imageProvider'
+import { getParamDisabledReasons } from '../../lib/paramCompatibility'
+import { getImageSearchSupport, getImageThinkingSupport } from '../../lib/imageSearch'
 import InputParamsPanel from './inputParamsPanel'
 
 const noop = () => {}
@@ -14,11 +16,14 @@ function render(profile: ApiProfile) {
     params: DEFAULT_PARAMS,
     setParams: vi.fn(),
     activeProfile: profile,
+    searchSupport: getImageSearchSupport(profile),
+    thinkingSupport: getImageThinkingSupport(profile),
+    complexityHint: hint,
+    disabledReasons: getParamDisabledReasons(profile),
+    hasInputImages: false,
     modelOptions: [{ label: profile.model, value: profile.model }],
     onModelChange: vi.fn(),
-    onProfileChange: vi.fn(),
     isFalProvider: profile.provider === 'fal',
-    isFalTextToImage: profile.provider === 'fal',
     displaySize: '1024x1024',
     qualityOptions: [{ label: 'auto', value: 'auto' }],
     selectClass: '',
@@ -68,35 +73,31 @@ function render(profile: ApiProfile) {
 describe('图片参数栏的协议能力', () => {
   it.each([
     ['xai', 'grok-imagine-image', 10],
-    ['gemini', 'gemini-3.1-flash-image', 1],
-    ['gemini-interactions', 'gemini-nano-banana-2.1', 1],
+    ['gemini', 'gemini-3.1-flash-image', 10],
+    ['gemini-interactions', 'gemini-nano-banana-2.1', 10],
     ['imagen', 'imagen-4.0-generate-001', 4],
   ] as const)('%s 使用比例和分辨率，隐藏 GPT 专属参数，并采用数量上限', (dialect, model, limit) => {
     const html = render(createDefaultOpenAIProfile({ model, imageApiDialect: dialect }))
     expect(html).toContain('比例')
     expect(html).toContain('分辨率')
     expect(html).not.toContain('尺寸')
-    expect(html).not.toContain('质量')
-    expect(html).not.toContain('更多')
     expect(html).not.toContain('PNG')
     expect(html).toContain(`max="${limit}"`)
   })
 
-  it('OpenAI Images 保留尺寸、质量和更多参数，统一中转可使用 Grok 模型名', () => {
+  it('OpenAI兼容的Grok模型使用统一任务比例参数', () => {
     const html = render(createDefaultOpenAIProfile({ model: 'grok-imagine-image', imageApiDialect: 'openai' }))
-    expect(html).toContain('尺寸')
+    expect(html).toContain('比例')
     expect(html).toContain('质量')
-    expect(html).toContain('更多')
-    expect(html).toContain('PNG')
-    expect(html).not.toContain('分辨率')
+    expect(html).toContain('分辨率')
+    expect(html).not.toContain('PNG')
   })
 
-  it.each(['fal', 'custom-http'])('已有 %s 不被模型名的自动识别改成原生参数', (provider) => {
+  it.each(['fal', 'custom-http'])('%s的Gemini模型复用TaskParams比例参数', (provider) => {
     const html = render({ ...createDefaultOpenAIProfile({ model: 'gemini-3.1-flash-image' }), provider })
-    expect(html).toContain('尺寸')
-    expect(html).toContain('质量')
-    expect(html).toContain('更多')
-    expect(html).not.toContain('分辨率')
+    expect(html).toContain('比例')
+    expect(html).toContain('分辨率')
+    expect(html).not.toContain('尺寸')
   })
 
   it('Responses API 保留现有参数，即使图片协议字段被预先保存', () => {

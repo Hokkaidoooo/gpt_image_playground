@@ -131,7 +131,7 @@ describe('本地保存与提示词摘要', () => {
 
   it('摘要只包含图片参数，不含API Key', () => {
     const profile = createDefaultOpenAIProfile({ model: 'gpt-image, grok-imagine-image', selectedModel: 'grok-imagine-image', apiKey: 'do-not-record-test-key', imageAspectRatio: '16:9' })
-    const task: TaskRecord = { id: 'record-fixture', prompt: '记录原提示词', params: DEFAULT_PARAMS, imageAspectRatio: '16:9', inputImageIds: [], outputImages: [], status: 'done', error: null, createdAt: 1, finishedAt: 2, elapsed: 1 }
+    const task: TaskRecord = { id: 'record-fixture', prompt: '记录原提示词', params: { ...DEFAULT_PARAMS, aspect_ratio: '16:9' }, inputImageIds: [], outputImages: [], status: 'done', error: null, createdAt: 1, finishedAt: 2, elapsed: 1 }
     const record = localImageRecord(task, profile)
     expect(record.model).toBe('grok-imagine-image')
     expect(record.aspect_ratio).toBe('16:9')

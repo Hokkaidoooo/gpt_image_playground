@@ -30,6 +30,7 @@ export interface DefaultApiUrlPatch {
   apiMode?: ApiMode
   model?: string
   imageGenerationModel?: string
+  svgModel?: string
   imageApiDialect?: ImageApiDialect
   imageAspectRatio?: string
   imageResolution?: string
@@ -60,6 +61,7 @@ export function parseDefaultApiUrl(rawUrl: string): DefaultApiUrlPatch {
   const apiModeParam = parsed.searchParams.get('apiMode')
   const modelParam = parsed.searchParams.get('model')
   const imageGenerationModelParam = parsed.searchParams.get('imageGenerationModel')
+  const svgModelParam = parsed.searchParams.get('svgModel')
   const imageApiDialectParam = parsed.searchParams.get('imageApiDialect')
   const imageAspectRatioParam = parsed.searchParams.get('imageAspectRatio')
   const imageResolutionParam = parsed.searchParams.get('imageResolution')
@@ -84,6 +86,7 @@ export function parseDefaultApiUrl(rawUrl: string): DefaultApiUrlPatch {
   if (apiModeParam === 'images' || apiModeParam === 'responses') patch.apiMode = apiModeParam
   if (modelParam !== null && modelParam.trim()) patch.model = modelParam.trim()
   if (imageGenerationModelParam !== null) patch.imageGenerationModel = imageGenerationModelParam.trim()
+  if (svgModelParam !== null) patch.svgModel = svgModelParam.trim() || undefined
   if (reasoningEffortParam !== null) patch.reasoningEffort = normalizeReasoningEffort(reasoningEffortParam)
   if (profileNameParam?.trim()) patch.name = profileNameParam.trim()
   if (codexCliParam !== null) patch.codexCli = codexCliParam.trim().toLowerCase() === 'true'

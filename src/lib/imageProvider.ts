@@ -37,6 +37,9 @@ const IMAGEN_ASPECT_RATIOS = ['1:1', '3:4', '4:3', '9:16', '16:9']
 
 export function resolveImageApiDialect(profile: ApiProfile, model?: string): ResolvedImageApiDialect {
   if (profile.imageApiDialect && profile.imageApiDialect !== 'auto') return profile.imageApiDialect
+  if (profile.provider === 'google') return 'gemini'
+  if (profile.provider === 'xai') return 'xai'
+  if (profile.imageApiDialect === undefined) return 'openai'
   const id = (model ?? resolveApiProfileModel(profile).model).trim().toLowerCase()
   if (/grok.*(?:image|imagine)/.test(id)) return 'xai'
   if (/imagen(?:[-_/]|$)/.test(id)) return 'imagen'
@@ -47,7 +50,7 @@ export function resolveImageApiDialect(profile: ApiProfile, model?: string): Res
 
 export function getImageProviderCapabilities(profile: ApiProfile, model?: string): ImageProviderCapabilities {
   const dialect = resolveImageApiDialect(profile, model)
-  const nativeParameters = profile.provider === 'openai' && profile.apiMode === 'images' && dialect !== 'openai'
+  const nativeParameters = ['openai', 'google', 'xai'].includes(profile.provider) && profile.apiMode === 'images' && dialect !== 'openai'
   if (!nativeParameters) {
     return {
       dialect,
@@ -71,15 +74,15 @@ export function getImageProviderCapabilities(profile: ApiProfile, model?: string
   const isFlashLite = /gemini.*flash-lite-image/.test(id)
   const isNanoBanana = /gemini.*nano[-_ ]?banana/.test(id)
   const isPro3 = /gemini-3(?:\.0)?-pro-image/.test(id)
-  const resolutions = isFlash25 || isFlashLite ? ['1K'] : isNanoBanana || isPro3 ? ['1K', '2K', '4K'] : ['512', '1K', '2K', '4K']
+  const resolutions = isFlash25 && profile.provider === 'google' ? [] : isFlash25 || isFlashLite ? ['1K'] : isNanoBanana || isPro3 ? ['1K', '2K', '4K'] : ['512', '1K', '2K', '4K']
   return {
     dialect,
     nativeParameters,
     // 这是本工具单次参考图数量上限，较多参考图的保真度仍取决于实际模型。
     maxInputImages: 14,
-    maxOutputImages: 1,
+    maxOutputImages: 10,
     supportsMask: false,
-    aspectRatios: [...(isFlash25 || isPro3 ? GOOGLE_ASPECT_RATIOS : GOOGLE_WIDE_ASPECT_RATIOS)],
+    aspectRatios: [...(isFlash25 || isFlashLite || isPro3 ? GOOGLE_ASPECT_RATIOS : GOOGLE_WIDE_ASPECT_RATIOS)],
     resolutions,
   }
 }

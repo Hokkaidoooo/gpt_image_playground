@@ -8,7 +8,7 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
-const makeProfile = (model = 'gpt-image-1') => createDefaultOpenAIProfile({ baseUrl: 'https://relay.example/v1', apiKey: 'private-test-key', model, apiProxy: false, streamImages: false })
+const makeProfile = (model = 'gpt-image-1') => createDefaultOpenAIProfile({ baseUrl: 'https://relay.example/v1', apiKey: 'private-test-key', model, imageApiDialect: 'auto', apiProxy: false, streamImages: false })
 
 describe('image provider protocol selection', () => {
   it.each([
@@ -40,7 +40,7 @@ describe('image provider protocol selection', () => {
 
   it('expresses different native reference and output limits in one capability source', () => {
     expect(getImageProviderCapabilities(makeProfile('grok-imagine-image'))).toMatchObject({ maxInputImages: 5, maxOutputImages: 10, supportsMask: false })
-    expect(getImageProviderCapabilities(makeProfile('gemini-nano-banana-2.1'))).toMatchObject({ maxInputImages: 14, maxOutputImages: 1, supportsMask: false })
+    expect(getImageProviderCapabilities(makeProfile('gemini-nano-banana-2.1'))).toMatchObject({ maxInputImages: 14, maxOutputImages: 10, supportsMask: false })
     expect(getImageProviderCapabilities(makeProfile('imagen-4.0-generate-001'))).toMatchObject({ maxInputImages: 0, maxOutputImages: 4, supportsMask: false })
   })
 

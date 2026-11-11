@@ -5,7 +5,7 @@ import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiProfile } from '../../types'
 import { createDefaultOpenAIProfile } from '../../lib/apiProfiles'
-import ImageModelsPanel, { ImageParameterControls } from './ImageModelsPanel'
+import ImageModelsPanel from './ImageModelsPanel'
 
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/platform', () => ({ isTauri: false, apiFetch }))
@@ -161,19 +161,16 @@ describe('原生图片参数', () => {
     expect(document.body.textContent).toContain('Imagen（旧接口兼容）')
     expect(option).not.toBeNull()
     await act(async () => option!.click())
-    expect(onPatch).toHaveBeenCalledWith({ imageApiDialect: 'gemini', codexCli: false, streamImages: false, responseFormatB64Json: false, transparentBackgroundMethod: 'api' })
+    expect(onPatch).toHaveBeenCalledWith({ imageApiDialect: 'gemini', codexCli: false, streamImages: false, responseFormatB64Json: false, transparentBackgroundMethod: 'local' })
   })
 
-  it('显示不支持的历史分辨率，允许用户明确改为合法值', async () => {
+  it('旧profile比例和分辨率不再提供第二套可写控件', async () => {
     const onPatch = vi.fn()
     const geminiProfile: ApiProfile = { ...profile, model: 'gemini-2.5-flash-image', imageApiDialect: 'gemini', imageResolution: '4K' }
-    await act(async () => root!.render(<ImageParameterControls profile={geminiProfile} onPatch={onPatch} />))
-    expect(container.textContent).toContain('4K（此模型不支持）')
+    await render(geminiProfile, onPatch)
+    expect(container.textContent).toContain('画面比例和分辨率在首页参数栏设置')
+    expect(container.textContent).not.toContain('4K（此模型不支持）')
+    expect(container.querySelectorAll('div.cursor-pointer')).toHaveLength(1)
     expect(onPatch).not.toHaveBeenCalled()
-    const selects = container.querySelectorAll('div.cursor-pointer')
-    await act(async () => (selects[1] as HTMLElement).click())
-    const option = [...document.querySelectorAll('div')].find((element) => element.childElementCount === 1 && element.textContent === '1K')
-    await act(async () => option!.click())
-    expect(onPatch).toHaveBeenCalledWith({ imageResolution: '1K' })
   })
 })

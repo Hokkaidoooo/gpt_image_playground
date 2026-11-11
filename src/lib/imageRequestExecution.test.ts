@@ -4,6 +4,7 @@ import { DEFAULT_PARAMS } from '../types'
 import { createDefaultOpenAIProfile, DEFAULT_SETTINGS } from './apiProfiles'
 import { getApiErrorMessage, type CallApiOptions } from './imageApiShared'
 import { callOpenAICompatibleImageApi } from './openaiCompatibleImageApi'
+import * as canvasImage from './canvasImage'
 import { prepareImageInputs } from './imageInputPreparation'
 
 vi.mock('./imageInputPreparation', () => ({
@@ -26,6 +27,18 @@ afterEach(() => {
 })
 
 describe('Images API 供应商兼容执行', () => {
+  it('原生标注与主图一起准备并以markup字段提交，不冒充遮罩', async () => {
+    vi.mocked(prepareImageInputs).mockResolvedValueOnce({ blobs: [new Blob(['resized-main'], { type: 'image/png' })], mask: new Blob(['resized-markup'], { type: 'image/png' }), adjustments: ['遮罩主图上传副本：缩小', '遮罩上传副本：同步缩小'] })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response())
+    const result = await callOpenAICompatibleImageApi({ ...options, inputImageDataUrls: [inputImage], markupDataUrl: inputImage }, profile)
+    expect(prepareImageInputs).toHaveBeenCalledWith([inputImage], inputImage, expect.any(Object))
+    const body = fetchMock.mock.calls[0][1]?.body as FormData
+    expect(body.has('mask')).toBe(false)
+    expect(await (body.get('markup') as File).text()).toBe('resized-markup')
+    expect(await (body.get('image[]') as File).text()).toBe('resized-main')
+    expect(result.inputImageAdjustments).toEqual(['标注主图上传副本：缩小', '标注上传副本：同步缩小'])
+  })
+
   it('参考图只准备一次，所有批次复用真实MIME和文件名并保留调整记录', async () => {
     const adjustments = ['参考图 1上传副本：20 MB → 10 MB，JPEG；原图保留。']
     vi.mocked(prepareImageInputs).mockResolvedValueOnce({ blobs: [new Blob(['prepared-jpeg'], { type: 'image/jpeg' })], mask: null, adjustments })
@@ -240,4 +253,128 @@ describe('供应商错误分类', () => {
     vi.spyOn(failed, 'text').mockRejectedValue(new Error('连接中断'))
     expect(await getApiErrorMessage(failed)).toBe('HTTP 503：无法读取供应商错误响应：连接中断')
   })
+})
+
+
+describe('OpenAI兼容模型的批次与上传副本', () => {
+  it.each(['gemini-example-image', 'grok-imagine-image-2.0'])('%s自动兼容每次一张，逐批保存且只准备一次参考图', async (model) => {
+    const adjustments = ['已生成JPEG上传副本']
+    vi.mocked(prepareImageInputs).mockResolvedValueOnce({ blobs: [new Blob(['small-jpeg'], { type: 'image/jpeg' })], mask: null, adjustments })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => response())
+    const completed = vi.fn().mockResolvedValue(undefined)
+    const result = await callOpenAICompatibleImageApi({ ...options, inputImageDataUrls: [inputImage], params: { ...DEFAULT_PARAMS, n: 5 }, onRequestCompleted: completed }, { ...profile, model, imageApiDialect: 'openai' })
+    expect(prepareImageInputs).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    expect(completed.mock.calls.map((call) => call[1])).toEqual([0, 1, 2, 3, 4])
+    for (const [, init] of fetchMock.mock.calls) {
+      const body = JSON.parse(String(init?.body))
+      expect(body.n).toBe(1)
+      expect(model.startsWith('gemini') ? body.image_urls[0] : body.image.url).toBe('data:image/jpeg;base64,c21hbGwtanBlZw==')
+    }
+    expect(result.images).toHaveLength(5)
+    expect(result.inputImageAdjustments).toEqual(adjustments)
+  })
+
+  it('兼容模型逐批保存失败后保留已生成图并停止后续', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => response())
+    const completed = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('保存失败'))
+    const result = await callOpenAICompatibleImageApi({ ...options, params: { ...DEFAULT_PARAMS, n: 5 }, onRequestCompleted: completed }, { ...profile, model: 'gemini-example-image', imageApiDialect: 'openai' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(result.images).toHaveLength(2)
+    expect(result.completionError).toContain('保存失败')
+    expect(result.failedRequests?.map((failure) => failure.requestIndex)).toEqual([2, 3, 4])
+  })
+
+  it('family参数省略按实际字段执行且标准模式保留原批量', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => response())
+    for (const model of ['gemini-example-image', 'grok-imagine-1.5-ext', 'grok-imagine-image-2.0']) {
+      await callOpenAICompatibleImageApi({ ...options, params: { ...DEFAULT_PARAMS, aspect_ratio: '16:9', quality: 'medium' } }, { ...profile, model, imageApiDialect: 'openai', responseFormatB64Json: true, imageRequestCompatibility: { mode: 'custom', omitParameters: ['size', 'quality', 'response_format'] } })
+      const body = JSON.parse(String(fetchMock.mock.lastCall?.[1]?.body))
+      expect(body).not.toHaveProperty('size')
+      expect(body).not.toHaveProperty('quality')
+      expect(body).not.toHaveProperty('response_format')
+    }
+    fetchMock.mockClear()
+    await callOpenAICompatibleImageApi({ ...options, params: { ...DEFAULT_PARAMS, n: 5 } }, { ...profile, model: 'gemini-example-image', imageApiDialect: 'openai', imageRequestCompatibility: { mode: 'standard' } })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).n).toBe(5)
+  })
+
+  it('链接型Grok参考图保持原URL契约并明确上传副本不适用', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response())
+    const result = await callOpenAICompatibleImageApi({ ...options, inputImageDataUrls: [inputImage], inputImageUrls: ['https://images.example/input.png'] }, { ...profile, model: 'grok-imagine-1.5-apimart', imageApiDialect: 'openai' })
+    expect(prepareImageInputs).not.toHaveBeenCalled()
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).image_urls).toEqual(['https://images.example/input.png'])
+    expect(result.inputImageAdjustments?.[0]).toContain('自动优化不适用')
+  })
+
+  it('custom multipart转换期间取消后不发真正请求', async () => {
+    let continuing = true
+    vi.spyOn(canvasImage, 'dataUrlToBlob').mockImplementationOnce(async () => {
+      await Promise.resolve()
+      continuing = false
+      return new Blob(['prepared'], { type: 'image/png' })
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    await expect(callOpenAICompatibleImageApi({ ...options, inputImageDataUrls: [inputImage], shouldContinue: () => continuing }, { ...profile, provider: 'custom' }, {
+      id: 'custom', name: 'custom', template: 'http-image', submit: { path: 'generate', contentType: 'multipart', body: { prompt: '$prompt' }, files: [{ field: 'image', source: 'inputImages' }], result: { b64JsonPaths: ['data.*.b64_json'] } },
+    })).rejects.toThrow('本次请求未发送')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+
+it('后续异步批次连接中断交回恢复流程，保留已checkpoint结果且不提交第三批', async () => {
+  let release!: () => void
+  const persisted = new Promise<void>((resolve) => { release = resolve })
+  const checkpoint = vi.fn().mockResolvedValue(undefined)
+  const queued = vi.fn(() => persisted)
+  const fetchMock = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(response())
+    .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ task_id: 'pending-second' }] }), { status: 202 }))
+    .mockImplementationOnce(async (_url, init) => {
+      if (!(init?.signal instanceof AbortSignal)) throw new Error('missing signal')
+      init.signal.dispatchEvent(new Event('abort'))
+      Object.defineProperty(init.signal, 'aborted', { value: true })
+      throw new DOMException('连接已中断', 'AbortError')
+    })
+  const task = callOpenAICompatibleImageApi({ ...options, params: { ...DEFAULT_PARAMS, n: 3 }, onRequestCompleted: checkpoint, onCustomTaskEnqueued: queued }, { ...profile, model: 'gemini-example-image', imageApiDialect: 'openai' })
+  const rejection = expect(task).rejects.toMatchObject({ name: 'AbortError', recoverableImageTask: true })
+  await vi.waitFor(() => expect(queued).toHaveBeenCalledExactlyOnceWith({ taskId: 'pending-second' }))
+  expect(checkpoint).toHaveBeenCalledTimes(1)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  release()
+  await rejection
+  expect(fetchMock).toHaveBeenCalledTimes(3)
+  expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(2)
+})
+
+
+it('第二批已提交但编号保存失败时保留原错误及恢复标记，不返回普通部分成功', async () => {
+  const storageError = new DOMException('IndexedDB写入失败', 'QuotaExceededError')
+  const checkpoint = vi.fn().mockResolvedValue(undefined)
+  const queued = vi.fn().mockRejectedValue(storageError)
+  const fetchMock = vi.spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(response())
+    .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ task_id: 'submitted-second' }] }), { status: 202 }))
+  const task = callOpenAICompatibleImageApi({ ...options, params: { ...DEFAULT_PARAMS, n: 3 }, onRequestCompleted: checkpoint, onCustomTaskEnqueued: queued }, { ...profile, model: 'gemini-example-image', imageApiDialect: 'openai' })
+  await expect(task).rejects.toBe(storageError)
+  expect(storageError).toMatchObject({ recoverableImageTask: true, name: 'QuotaExceededError', message: '异步任务已提交，但任务编号保存失败：IndexedDB写入失败；正在保留任务编号并继续查询' })
+  expect(checkpoint).toHaveBeenCalledTimes(1)
+  expect(queued).toHaveBeenCalledExactlyOnceWith({ taskId: 'submitted-second' })
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(fetchMock.mock.calls.every(([, init]) => init?.method === 'POST')).toBe(true)
+})
+
+it('自定义异步任务编号保存失败同样标记恢复且不重新提交', async () => {
+  const storageError = new Error('任务记录写入失败')
+  const queued = vi.fn().mockRejectedValue(storageError)
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ task_id: 'custom-submitted' }), { status: 202 }))
+  await expect(callOpenAICompatibleImageApi({ ...options, onCustomTaskEnqueued: queued }, { ...profile, provider: 'custom' }, {
+    id: 'custom', name: 'custom', template: 'http-image', submit: { path: 'generate', body: { prompt: '$prompt' }, taskIdPath: 'task_id' },
+    poll: { path: 'tasks/{task_id}', statusPath: 'status', successValues: ['done'], failureValues: ['failed'], result: { b64JsonPaths: ['data.*.b64_json'] } },
+  })).rejects.toBe(storageError)
+  expect(storageError).toMatchObject({ recoverableImageTask: true, message: expect.stringContaining('异步任务已提交') })
+  expect(queued).toHaveBeenCalledExactlyOnceWith({ taskId: 'custom-submitted' })
+  expect(fetchMock).toHaveBeenCalledTimes(1)
 })

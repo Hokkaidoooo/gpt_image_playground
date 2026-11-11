@@ -59,6 +59,16 @@ function fallback() {
 }
 
 describe('persisted state codec', () => {
+  it('旧原生配置迁移到参数栏并消费活动配置中的旧字段', () => {
+    const result = normalizePersistedState({
+      settings: { profiles: [{ id: 'legacy', provider: 'openai', model: 'gemini-3-pro-image', imageApiDialect: 'gemini', imageAspectRatio: '16:9', imageResolution: '2K' }], activeProfileId: 'legacy' },
+      params: DEFAULT_PARAMS,
+    }, fallback(), 100)!
+    expect(result.state.params).toMatchObject({ aspect_ratio: '16:9', resolution: '2K' })
+    expect(result.state.settings.profiles[0]).not.toHaveProperty('imageAspectRatio')
+    expect(result.state.settings.profiles[0]).not.toHaveProperty('imageResolution')
+  })
+
   it.each([undefined, 'custom-image-model', '', '   '])('restores profile and legacy top-level tool model %s without autofilling', (imageGenerationModel) => {
     const profile = { apiMode: 'responses', model: 'legacy-text-model', ...(imageGenerationModel === undefined ? {} : { imageGenerationModel }) }
     for (const settings of [profile, { profiles: [profile] }]) {

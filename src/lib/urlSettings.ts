@@ -1,4 +1,5 @@
 import type { ApiMode, ApiProfile, AppSettings } from '../types'
+import { normalizeBaseUrl } from './devProxy'
 import { normalizeImageProviderBaseUrl } from './imageProviderUrl'
 import { normalizeImageRequestCompatibility, parseImageRequestCompatibilityParam } from './imageRequestCompatibility'
 import {
@@ -6,6 +7,7 @@ import {
   DEFAULT_IMAGES_MODEL,
   DEFAULT_RESPONSES_MODEL,
   findEquivalentApiProfile,
+  getApiProfileContentKey,
   mergeImportedSettings,
   normalizeModelList,
   normalizeSettings,
@@ -15,7 +17,7 @@ import {
 } from './apiProfiles'
 import { isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile } from './presetConfig'
 
-const URL_SETTING_KEYS = ['settings', 'profileId', 'apiUrl', 'apiKey', 'codexCli', 'apiMode', 'model', 'imageGenerationModel', 'imageApiDialect', 'imageAspectRatio', 'imageResolution', 'imageRequestCompatibility', 'profileName', 'reasoningEffort', 'streamImages', 'streamPartialImages', 'transparentBackgroundMethod']
+const URL_SETTING_KEYS = ['settings', 'profileId', 'apiUrl', 'apiKey', 'codexCli', 'apiMode', 'model', 'imageGenerationModel', 'svgModel', 'imageApiDialect', 'imageAspectRatio', 'imageResolution', 'imageRequestCompatibility', 'profileName', 'reasoningEffort', 'streamImages', 'streamPartialImages', 'transparentBackgroundMethod']
 
 function getProfileDedupKey(profile: ApiProfile) {
   return JSON.stringify([
@@ -31,10 +33,11 @@ function getProfileDedupKey(profile: ApiProfile) {
     profile.streamImages === true,
     profile.streamPartialImages ?? 0,
     profile.transparentBackgroundMethod,
-    profile.imageApiDialect ?? 'auto',
+    profile.imageApiDialect,
     profile.imageAspectRatio,
     profile.imageResolution,
     profile.imageRequestCompatibility,
+    profile.svgModel,
   ])
 }
 
@@ -51,11 +54,13 @@ function imageSettingsFromParams(params: URLSearchParams): Partial<ApiProfile> {
   const dialect = params.get('imageApiDialect')
   const ratio = params.get('imageAspectRatio')
   const resolution = params.get('imageResolution')
+  const svgModel = params.get('svgModel')
   const compatibility = params.get('imageRequestCompatibility')
   return {
     ...(dialect !== null ? { imageApiDialect: normalizeImageApiDialect(dialect) } : {}),
     ...(ratio !== null ? { imageAspectRatio: ratio.trim() } : {}),
     ...(resolution !== null ? { imageResolution: resolution.trim() } : {}),
+    ...(svgModel !== null ? { svgModel: svgModel.trim() || undefined } : {}),
     ...(compatibility !== null ? { imageRequestCompatibility: parseImageRequestCompatibilityParam(compatibility) } : {}),
   }
 }
@@ -114,12 +119,17 @@ function ensureUrlSettingsProfileIds(value: unknown, currentSettings: Partial<Ap
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value
   const record = value as Record<string, unknown>
   if (!Array.isArray(record.profiles)) return value
-  const usedIds = new Set(normalizeSettings(currentSettings).profiles.map((profile) => profile.id))
+  const current = normalizeSettings(currentSettings)
+  const usedIds = new Set(current.profiles.map((profile) => profile.id))
+  const explicitIds = new Set<string>()
   const emittedIds = new Set<string>()
   for (const item of record.profiles) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue
     const id = typeof (item as { id?: unknown }).id === 'string' ? (item as { id: string }).id.trim() : ''
-    if (id) usedIds.add(id)
+    if (id) {
+      usedIds.add(id)
+      explicitIds.add(id)
+    }
   }
   return {
     ...record,
@@ -129,6 +139,17 @@ function ensureUrlSettingsProfileIds(value: unknown, currentSettings: Partial<Ap
       if (typeof profile.id === 'string' && profile.id.trim() && !emittedIds.has(profile.id.trim())) {
         emittedIds.add(profile.id.trim())
         return { ...profile, id: profile.id.trim() }
+      }
+      if (typeof profile.id !== 'string' || !profile.id.trim()) {
+        const normalized = normalizeSettings({ customProviders: record.customProviders, profiles: [profile] }).profiles[0]
+        const key = getApiProfileContentKey(normalized)
+        const existing = current.profiles.find((saved) =>
+          !explicitIds.has(saved.id) && !emittedIds.has(saved.id)
+          && getApiProfileContentKey(saved) === key)
+        if (existing) {
+          emittedIds.add(existing.id)
+          return { ...profile, id: existing.id }
+        }
       }
       return { ...profile, id: createUrlProfileId(usedIds) }
     }),
@@ -193,6 +214,7 @@ function buildPresetConfigOnlySettingsFromUrlParams(currentSettings: Partial<App
           if (typeof matched.baseUrl === 'string') patch.baseUrl = matched.baseUrl
           if (typeof matched.model === 'string' && matched.model.trim()) patch.model = matched.model.trim()
           if (typeof matched.imageGenerationModel === 'string') patch.imageGenerationModel = matched.imageGenerationModel.trim()
+          if (typeof matched.svgModel === 'string') patch.svgModel = matched.svgModel.trim() || undefined
           if (matched.imageApiDialect !== undefined) patch.imageApiDialect = normalizeImageApiDialect(matched.imageApiDialect)
           if (typeof matched.imageAspectRatio === 'string') patch.imageAspectRatio = matched.imageAspectRatio.trim()
           if (typeof matched.imageResolution === 'string') patch.imageResolution = matched.imageResolution.trim()
@@ -226,7 +248,9 @@ function buildPresetConfigOnlySettingsFromUrlParams(currentSettings: Partial<App
   if (!apiKeyOnly) {
     Object.assign(patch, imageSettingsFromParams(searchParams))
     if (profileNameParam?.trim()) patch.name = profileNameParam.trim()
-    if (apiUrlParam !== null) patch.baseUrl = normalizeImageProviderBaseUrl(apiUrlParam, patch.imageApiDialect ?? targetProfile.imageApiDialect)
+    if (apiUrlParam !== null) patch.baseUrl = targetProfile.provider === 'google' || targetProfile.provider === 'xai'
+      ? normalizeBaseUrl(apiUrlParam, targetProfile.provider === 'google' ? 'v1beta' : 'v1')
+      : normalizeImageProviderBaseUrl(apiUrlParam, patch.imageApiDialect ?? targetProfile.imageApiDialect)
     if (modelParam?.trim()) patch.model = modelParam.trim()
     if (imageGenerationModelParam !== null) patch.imageGenerationModel = imageGenerationModelParam.trim()
     if (transparentBackgroundMethodParam === 'api' || transparentBackgroundMethodParam === 'local') {
@@ -289,9 +313,19 @@ function buildRegularSettingsFromUrlParams(currentSettings: Partial<AppSettings>
 
   const imageParams = imageSettingsFromParams(searchParams)
   const hasLegacyOpenAIParams = apiUrlParam !== null || apiKeyParam !== null || codexCliParam !== null || apiMode !== undefined || modelParam !== null || imageGenerationModelParam !== null || profileNameParam !== null || reasoningEffortParam !== null || streamImagesParam !== null || streamPartialImagesParam !== null || Object.keys(imageParams).length > 0
-  const settings = importedSettings == null
-    ? normalizeSettings(currentSettings)
-    : activateFirstImportedProfile(mergeImportedSettings(currentSettings, importedSettings), importedSettings)
+  const current = normalizeSettings(currentSettings)
+  const merged = importedSettings == null ? undefined : mergeImportedSettings(current, importedSettings)
+  // URL 仅导入 API 配置，其他设置沿用本地值；复用相同配置时保留本地的默认标记，分享链接不携带该标记
+  const settings = merged
+    ? activateFirstImportedProfile(normalizeSettings({
+        ...current,
+        customProviders: merged.customProviders,
+        profiles: merged.profiles.map((profile) => {
+          const existing = current.profiles.find((item) => item.id === profile.id)
+          return existing && getApiProfileContentKey(existing) === getApiProfileContentKey(profile) ? existing : profile
+        }),
+      }), importedSettings)
+    : current
 
   const requestedProfileId = profileIdParam?.trim() ?? ''
   const requestedNonOpenAIProfile = requestedProfileId

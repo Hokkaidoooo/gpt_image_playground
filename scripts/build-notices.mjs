@@ -1,4 +1,4 @@
-// 生成第三方许可清单 src/assets/third-party-notices.txt（npm run notices），由“设置 → 关于 → 第三方许可”弹窗显示。
+// 生成第三方许可清单 src/assets/third-party-notices.txt（npm run notices），由「设置 → 关于 → 第三方许可」弹窗显示。
 // 生成结果提交进仓库，Web 版构建不需要 cargo-about；Rust 或前端依赖变化后重新运行并提交。
 // 内容：third-party-licenses/ 中的字体许可，cargo-about 汇总的 Rust 依赖（配置见 src-tauri/about.toml，Windows 目标的普通与构建依赖），
 // 以及 npm ls --omit=dev 列出的前端依赖。
@@ -36,6 +36,11 @@ section('Maple Mono NF CN 字体', [
   '项目地址：https://github.com/subframe7536/maple-font',
   '',
   read('third-party-licenses/MapleMono-LICENSE.txt'),
+].join('\n'))
+section('Lobe Icons（设置中 Claude Code、Codex 的图标）', [
+  '项目地址：https://github.com/lobehub/lobe-icons',
+  '',
+  read('third-party-licenses/LobeIcons-LICENSE.txt'),
 ].join('\n'))
 
 // Rust：按许可原文分组，每组列出使用它的包；本项目自己的包（没有 source）不列出

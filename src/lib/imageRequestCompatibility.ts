@@ -53,8 +53,10 @@ export function parseImageRequestCompatibilityParam(value: string): ImageRequest
 }
 
 export function resolveImageRequestCompatibility(profile: ApiProfile): ResolvedImageRequestCompatibility {
-  const standard: ResolvedImageRequestCompatibility = { mode: 'standard', maxImagesPerRequest: MAX_IMAGES_PER_REQUEST, omitParameters: [], editImageField: 'image[]', referenceImagePolicy: 'original', maxReferenceImageMB: 50 }
-  if (profile.provider !== 'openai' || profile.apiMode !== 'images' || getImageProviderCapabilities(profile).nativeParameters) return standard
+  const capabilities = getImageProviderCapabilities(profile)
+  const nativeSingleImage = capabilities.nativeParameters && ['gemini', 'gemini-interactions'].includes(capabilities.dialect)
+  const standard: ResolvedImageRequestCompatibility = { mode: 'standard', maxImagesPerRequest: nativeSingleImage ? 1 : MAX_IMAGES_PER_REQUEST, omitParameters: [], editImageField: 'image[]', referenceImagePolicy: 'original', maxReferenceImageMB: 50 }
+  if (profile.provider !== 'openai' || profile.apiMode !== 'images' || capabilities.nativeParameters) return standard
   const compatibility = normalizeImageRequestCompatibility(profile.imageRequestCompatibility)
   const mode = compatibility?.mode ?? 'auto'
   const singleImage = profile.codexCli || profile.streamImages === true
@@ -64,7 +66,8 @@ export function resolveImageRequestCompatibility(profile: ApiProfile): ResolvedI
   } catch (err) {
     // 编辑地址时不应用站点规则，提交仍由接口地址校验处理。
     if (!(err instanceof TypeError)) throw err
-  }  const maxReferenceImageMB = compatibility?.maxReferenceImageMB ?? (hostname === 'api.openai.com' ? 50 : 14)
+  }
+  const maxReferenceImageMB = compatibility?.maxReferenceImageMB ?? (hostname === 'api.openai.com' ? 50 : 14)
   if (mode === 'standard') return { ...standard, maxImagesPerRequest: singleImage ? 1 : MAX_IMAGES_PER_REQUEST, maxReferenceImageMB }
   if (mode === 'custom') return {
     mode,
@@ -92,7 +95,7 @@ export function getImageRequestBatchCount(profile: ApiProfile, n: number): numbe
 
 export function usesSequentialImageRequests(profile: ApiProfile, n: number): boolean {
   const compatibility = resolveImageRequestCompatibility(profile)
-  return compatibility.mode !== 'standard' && n > compatibility.maxImagesPerRequest
+  return n > compatibility.maxImagesPerRequest && (compatibility.mode !== 'standard' || getImageProviderCapabilities(profile).nativeParameters)
 }
 
 export function getTaskOmittedImageParameters(task: TaskRecord): ImageRequestOmittableParameter[] {

@@ -1,5 +1,6 @@
-import type { ApiProfile, ImageRequestCompatibility } from '../../types'
+import type { ApiProfile, ImageRequestCompatibility, ImageRequestOmittableParameter } from '../../types'
 import { MAX_IMAGES_PER_REQUEST, resolveImageRequestCompatibility } from '../../lib/imageRequestCompatibility'
+import { getImageModelFamily, resolveApiProfileModel, supportsGrokQuality, usesGrokSizeParams } from '../../lib/imageModels'
 import Select from '../Select'
 
 const PARAMETER_LABELS = {
@@ -18,7 +19,18 @@ export default function ImageCompatibilityPanel({ profile, onPatch, disabled = f
   onPatch: (patch: Partial<ApiProfile>) => void
   disabled?: boolean
 }) {
-  const resolved = resolveImageRequestCompatibility(profile)
+  const selectedProfile = resolveApiProfileModel(profile)
+  const resolved = resolveImageRequestCompatibility(selectedProfile)
+  const family = getImageModelFamily(selectedProfile)
+  const urlOnlyReferences = usesGrokSizeParams(selectedProfile)
+  const parameters: ImageRequestOmittableParameter[] = family
+    ? [
+        ...(family === 'gemini' || urlOnlyReferences ? ['size' as const] : []),
+        ...(family === 'grok' && !urlOnlyReferences && supportsGrokQuality(selectedProfile.model) ? ['quality' as const] : []),
+        'response_format',
+      ]
+    : Object.keys(PARAMETER_LABELS) as ImageRequestOmittableParameter[]
+  const omitted = resolved.omitParameters.filter((parameter) => parameters.includes(parameter))
   const mode = profile.imageRequestCompatibility?.mode ?? 'auto'
   const custom: ImageRequestCompatibility = {
     mode: 'custom',
@@ -50,42 +62,50 @@ export default function ImageCompatibilityPanel({ profile, onPatch, disabled = f
       </label>
       <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
         {mode === 'standard'
-          ? '按标准接口发送所选参数。供应商需要支持对应的张数、画质和审核选项。'
+          ? '按当前接口发送所选参数。供应商需要支持对应的张数和参数选项。'
           : `多张图片每次生成 ${resolved.maxImagesPerRequest} 张，按顺序完成；遇到失败即停止，已完成的图片保留。`}
-        {resolved.omitParameters.length > 0 && ` ${resolved.omitParameters.map((name) => PARAMETER_LABELS[name]).join('、')}使用供应商默认值。`}
+        {omitted.length > 0 && ` ${omitted.map((name) => name === 'size' && family ? '画面比例' : PARAMETER_LABELS[name]).join('、')}使用供应商默认值。`}
       </p>
-      <label className="block space-y-1.5">
-        <span className="text-xs text-gray-600 dark:text-gray-300">参考图处理</span>
-        <Select
-          value={resolved.referenceImagePolicy}
-          onChange={(value) => onPatch({ imageRequestCompatibility: {
-            ...profile.imageRequestCompatibility,
-            mode: mode === 'standard' ? 'custom' : mode,
-            referenceImagePolicy: value as 'auto' | 'original',
-          } })}
-          options={[
-            { label: '自动优化上传副本（保留原图）', value: 'auto' },
-            { label: '保留原图，仅检查大小和格式', value: 'original' },
-          ]}
-          disabled={disabled || mode === 'standard'}
-          className={SELECT_CLASS}
-        />
-      </label>
-      <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
-        每张上传图片最多 {resolved.maxReferenceImageMB} MB。自动优化会在超限时调整上传副本的编码或尺寸，详情中可查看调整记录。
-      </p>
-      {mode === 'custom' && (
+      {urlOnlyReferences ? (
+        <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">此模型由供应商直接读取参考图链接，本机自动优化和图片大小设置不适用。</p>
+      ) : (
         <>
           <label className="block space-y-1.5">
-            <span className="text-xs text-gray-600 dark:text-gray-300">参考图大小上限</span>
+            <span className="text-xs text-gray-600 dark:text-gray-300">参考图处理</span>
             <Select
-              value={String(resolved.maxReferenceImageMB)}
-              onChange={(value) => patchCustom({ maxReferenceImageMB: Number(value) })}
-              options={Array.from({ length: 50 }, (_, index) => ({ label: `${index + 1} MB`, value: String(index + 1) }))}
-              disabled={disabled}
+              value={resolved.referenceImagePolicy}
+              onChange={(value) => onPatch({ imageRequestCompatibility: {
+                ...profile.imageRequestCompatibility,
+                mode: mode === 'standard' ? 'custom' : mode,
+                referenceImagePolicy: value as 'auto' | 'original',
+              } })}
+              options={[
+                { label: '自动优化上传副本（保留原图）', value: 'auto' },
+                { label: '保留原图，仅检查大小和格式', value: 'original' },
+              ]}
+              disabled={disabled || mode === 'standard'}
               className={SELECT_CLASS}
             />
           </label>
+          <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+            每张上传图片最多 {resolved.maxReferenceImageMB} MB。自动优化会在超限时调整上传副本的编码或尺寸，详情中可查看调整记录。
+          </p>
+        </>
+      )}
+      {mode === 'custom' && (
+        <>
+          {!urlOnlyReferences && (
+            <label className="block space-y-1.5">
+              <span className="text-xs text-gray-600 dark:text-gray-300">参考图大小上限</span>
+              <Select
+                value={String(resolved.maxReferenceImageMB)}
+                onChange={(value) => patchCustom({ maxReferenceImageMB: Number(value) })}
+                options={Array.from({ length: 50 }, (_, index) => ({ label: `${index + 1} MB`, value: String(index + 1) }))}
+                disabled={disabled}
+                className={SELECT_CLASS}
+              />
+            </label>
+          )}
           <label className="block space-y-1.5">
             <span className="text-xs text-gray-600 dark:text-gray-300">每次请求最多生成</span>
             <Select
@@ -98,10 +118,10 @@ export default function ImageCompatibilityPanel({ profile, onPatch, disabled = f
           </label>
           <fieldset disabled={disabled} className="space-y-2 text-xs text-gray-600 dark:text-gray-300">
             <legend className="mb-2">使用供应商默认值的选项</legend>
-            {Object.entries(PARAMETER_LABELS).map(([name, label]) => {
-              const parameter = name as keyof typeof PARAMETER_LABELS
+            {parameters.map((parameter) => {
+              const label = parameter === 'size' && family ? '画面比例' : PARAMETER_LABELS[parameter]
               return (
-                <label key={name} className="flex items-center gap-2">
+                <label key={parameter} className="flex items-center gap-2">
                   <input
                     type="checkbox"
                     checked={resolved.omitParameters.includes(parameter)}
@@ -116,19 +136,21 @@ export default function ImageCompatibilityPanel({ profile, onPatch, disabled = f
               )
             })}
           </fieldset>
-          <label className="block space-y-1.5">
-            <span className="text-xs text-gray-600 dark:text-gray-300">参考图上传方式</span>
-            <Select
-              value={resolved.editImageField}
-              onChange={(value) => patchCustom({ editImageField: value as 'image[]' | 'image' })}
-              options={[
-                { label: '多参考图（image[]）', value: 'image[]' },
-                { label: '单参考图（image）', value: 'image' },
-              ]}
-              disabled={disabled}
-              className={SELECT_CLASS}
-            />
-          </label>
+          {!family && (
+            <label className="block space-y-1.5">
+              <span className="text-xs text-gray-600 dark:text-gray-300">参考图上传方式</span>
+              <Select
+                value={resolved.editImageField}
+                onChange={(value) => patchCustom({ editImageField: value as 'image[]' | 'image' })}
+                options={[
+                  { label: '多参考图（image[]）', value: 'image[]' },
+                  { label: '单参考图（image）', value: 'image' },
+                ]}
+                disabled={disabled}
+                className={SELECT_CLASS}
+              />
+            </label>
+          )}
         </>
       )}
     </section>

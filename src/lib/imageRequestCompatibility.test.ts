@@ -3,7 +3,7 @@ import { createDefaultOpenAIProfile, normalizeSettings, switchApiProfileProvider
 import { getImageRequestBatchCount, normalizeImageRequestCompatibility, resolveImageRequestCompatibility, usesSequentialImageRequests } from './imageRequestCompatibility'
 import type { ApiProfile, ImageRequestCompatibility } from '../types'
 
-const profile = (overrides: Partial<ApiProfile> = {}) => createDefaultOpenAIProfile({ baseUrl: 'https://relay.example.test/v1', ...overrides })
+const profile = (overrides: Partial<ApiProfile> = {}) => createDefaultOpenAIProfile({ baseUrl: 'https://relay.example.test/v1', imageApiDialect: 'auto', ...overrides })
 
 describe('图片请求兼容策略', () => {
   it('旧供应商配置无需修改即可按单张顺序生成', () => {
@@ -58,13 +58,25 @@ describe('图片请求兼容策略', () => {
     { provider: 'fal' },
     { provider: 'custom-http' },
     { apiMode: 'responses' as const },
-    { imageApiDialect: 'gemini' as const },
     { model: 'gpt-image-2, grok-imagine-image', selectedModel: 'grok-imagine-image' },
-    { model: 'gemini-3-pro-image' },
   ])('原生协议和其他供应商保持其自身契约 %o', (overrides) => {
     const current = profile({ imageRequestCompatibility: { mode: 'custom', maxImagesPerRequest: 1, omitParameters: ['quality'] }, ...overrides })
     expect(resolveImageRequestCompatibility(current)).toEqual({ mode: 'standard', maxImagesPerRequest: 10, omitParameters: [], editImageField: 'image[]', referenceImagePolicy: 'original', maxReferenceImageMB: 50 })
     expect(usesSequentialImageRequests(current, 5)).toBe(false)
+  })
+
+  it.each([
+    { imageApiDialect: 'gemini' as const },
+    { imageApiDialect: 'gemini-interactions' as const },
+    { provider: 'google', imageApiDialect: undefined },
+    { model: 'gemini-3-pro-image' },
+  ])('Google原生多张使用逐批超时，不启用总请求计时 %o', (overrides) => {
+    const current = profile(overrides)
+    expect(usesSequentialImageRequests(current, 5)).toBe(true)
+    expect(usesSequentialImageRequests(current, 1)).toBe(false)
+    expect(resolveImageRequestCompatibility(current).mode).toBe('standard')
+    expect(resolveImageRequestCompatibility(current).maxImagesPerRequest).toBe(1)
+    expect(getImageRequestBatchCount(current, 5)).toBe(5)
   })
 
   it('显式OpenAI协议优先于模型名称推断', () => {

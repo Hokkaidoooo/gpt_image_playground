@@ -8,11 +8,11 @@ import * as platform from './platform'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
 const IMAGE = `data:image/png;base64,${PNG}`
-const makeProfile = (model = 'grok-imagine-image', patch: Partial<ApiProfile> = {}) => createDefaultOpenAIProfile({ baseUrl: 'https://provider.example/v1', apiKey: 'private-test-key', model, streamImages: false, apiProxy: false, ...patch })
+const makeProfile = (model = 'grok-imagine-image', patch: Partial<ApiProfile> = {}) => createDefaultOpenAIProfile({ baseUrl: 'https://provider.example/v1', apiKey: 'private-test-key', model, imageApiDialect: 'auto', streamImages: false, apiProxy: false, ...patch })
 const makeOptions = (profile: ApiProfile, patch: Partial<CallApiOptions> = {}): CallApiOptions => ({
   settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id }),
   prompt: '生成一只小猫',
-  params: { ...DEFAULT_PARAMS },
+  params: { ...DEFAULT_PARAMS, aspect_ratio: profile.imageAspectRatio ?? DEFAULT_PARAMS.aspect_ratio, resolution: profile.imageResolution ?? DEFAULT_PARAMS.resolution },
   inputImageDataUrls: [],
   ...patch,
 })
@@ -27,14 +27,14 @@ describe('xAI native image requests', () => {
   it('sends only documented generation parameters and preserves response MIME', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ data: [{ b64_json: PNG, mime_type: 'image/png' }] }))
     const profile = makeProfile('grok-imagine-image-2.0', { imageAspectRatio: '16:9', imageResolution: '2K' })
-    const result = await callNativeImageApi(makeOptions(profile, { params: { ...DEFAULT_PARAMS, n: 2 } }), profile)
+    const result = await callNativeImageApi(makeOptions(profile, { params: { ...DEFAULT_PARAMS, n: 2, aspect_ratio: '16:9', resolution: '2K' } }), profile)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock.mock.calls[0][0]).toBe('https://provider.example/v1/images/generations')
     const init = fetchMock.mock.calls[0][1] as RequestInit
     expect(init.headers).toMatchObject({ Authorization: 'Bearer private-test-key', 'Content-Type': 'application/json' })
-    expect(JSON.parse(String(init.body))).toEqual({ model: 'grok-imagine-image-2.0', prompt: '生成一只小猫', n: 2, response_format: 'b64_json', aspect_ratio: '16:9', resolution: '2k' })
+    expect(JSON.parse(String(init.body))).toEqual({ model: 'grok-imagine-image-2.0', prompt: '生成一只小猫', n: 2, aspect_ratio: '16:9', resolution: '2k', quality: 'auto' })
     expect(result.images).toEqual([IMAGE])
-    expect(result.actualParams).toMatchObject({ n: 1, output_format: 'png' })
+    expect(result.images[0]).toMatch(/^data:image\/png;/)
   })
 
   it('uses JSON image for single image editing', async () => {
@@ -43,7 +43,7 @@ describe('xAI native image requests', () => {
     await callNativeImageApi(makeOptions(profile, { inputImageDataUrls: [IMAGE] }), profile)
     expect(fetchMock.mock.calls[0][0]).toBe('https://provider.example/v1/images/edits')
     const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
-    expect(body.image).toEqual({ url: IMAGE })
+    expect(body.image).toEqual({ type: 'image_url', url: IMAGE })
     expect(body).not.toHaveProperty('images')
     expect(body).not.toHaveProperty('size')
     expect(body).not.toHaveProperty('mask')
@@ -54,16 +54,16 @@ describe('xAI native image requests', () => {
     const profile = makeProfile('grok-imagine-image', { imageAspectRatio: '3:4' })
     await callNativeImageApi(makeOptions(profile, { inputImageDataUrls: [IMAGE, IMAGE] }), profile)
     const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
-    expect(body.images).toEqual([{ url: IMAGE }, { url: IMAGE }])
+    expect(body.images).toEqual([{ type: 'image_url', url: IMAGE }, { type: 'image_url', url: IMAGE }])
     expect(body).not.toHaveProperty('image')
     expect(body.aspect_ratio).toBe('3:4')
   })
 
-  it('rejects a ratio override for single image editing before requesting the API', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-    const profile = makeProfile('grok-imagine-image', { imageAspectRatio: '16:9' })
-    await expect(callNativeImageApi(makeOptions(profile, { inputImageDataUrls: [IMAGE] }), profile)).rejects.toThrow('单张参考图')
-    expect(fetchMock).not.toHaveBeenCalled()
+  it('uses supported aspect ratio and quality for native xAI editing', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ data: [{ b64_json: PNG }] }))
+    const profile = makeProfile('grok-imagine-image-2.0')
+    await callNativeImageApi(makeOptions(profile, { inputImageDataUrls: [IMAGE], params: { ...DEFAULT_PARAMS, aspect_ratio: '16:9', quality: 'medium' } }), profile)
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ aspect_ratio: '16:9', quality: 'medium', image: { type: 'image_url', url: IMAGE } })
   })
 
   it('rejects more than five reference images before requesting the API', async () => {
@@ -119,7 +119,7 @@ describe('Google generateContent image requests', () => {
     const init = fetchMock.mock.calls[0][1] as RequestInit
     expect(fetchMock.mock.calls[0][0]).toBe('https://google.example/v1beta/models/gemini-3.1-flash-image-preview:generateContent')
     expect(init.headers).toEqual({ 'x-goog-api-key': 'private-test-key', 'Content-Type': 'application/json' })
-    expect(JSON.parse(String(init.body))).toEqual({ contents: [{ role: 'user', parts: [{ text: '生成一只小猫' }, { inlineData: { mimeType: 'image/png', data: PNG } }] }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: '4:5', imageSize: '4K' } } })
+    expect(JSON.parse(String(init.body))).toEqual({ contents: [{ role: 'user', parts: [{ text: '生成一只小猫' }, { inlineData: { mimeType: 'image/png', data: PNG } }] }], generationConfig: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: '4:5', imageSize: '4K' } } })
     expect(result.images).toEqual([IMAGE])
   })
 
@@ -141,11 +141,14 @@ describe('Google generateContent image requests', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('does not emulate multiple Google images with extra paid calls', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
+  it('executes explicitly requested Google images sequentially and checkpoints each result', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: PNG } }] } }] }))
+    const completed = vi.fn().mockResolvedValue(undefined)
     const profile = makeProfile('gemini-3.1-flash-image', { baseUrl: 'https://google.example' })
-    await expect(callNativeImageApi(makeOptions(profile, { params: { ...DEFAULT_PARAMS, n: 2 } }), profile)).rejects.toThrow('1')
-    expect(fetchMock).not.toHaveBeenCalled()
+    const result = await callNativeImageApi(makeOptions(profile, { params: { ...DEFAULT_PARAMS, n: 2 }, onRequestCompleted: completed }), profile)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(completed.mock.calls.map((call) => call[1])).toEqual([0, 1])
+    expect(result.images).toEqual([IMAGE, IMAGE])
   })
 })
 
@@ -197,7 +200,7 @@ describe('historical Imagen relay compatibility', () => {
   it('accepts explicit legacy predict requests and prediction image bytes', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ predictions: [{ bytesBase64Encoded: PNG, mimeType: 'image/png' }] }))
     const profile = makeProfile('imagen-4.0-generate-001', { baseUrl: 'https://google-relay.example/v1beta', imageApiDialect: 'imagen', imageAspectRatio: '16:9', imageResolution: '2K' })
-    const result = await callNativeImageApi(makeOptions(profile, { params: { ...DEFAULT_PARAMS, n: 4 } }), profile)
+    const result = await callNativeImageApi(makeOptions(profile, { params: { ...DEFAULT_PARAMS, n: 4, aspect_ratio: '16:9', resolution: '2K' } }), profile)
     expect(fetchMock.mock.calls[0][0]).toBe('https://google-relay.example/v1beta/models/imagen-4.0-generate-001:predict')
     const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
     expect(body).toEqual({ instances: [{ prompt: '生成一只小猫' }], parameters: { sampleCount: 4, aspectRatio: '16:9', sampleImageSize: '2K' } })
@@ -215,7 +218,7 @@ describe('native image validation and errors', () => {
   })
 
   it.each([
-    [{ maskDataUrl: IMAGE }, '蒙版'],
+    [{ maskDataUrl: IMAGE }, '遮罩'],
     [{ nativeTransparentBackground: true }, '透明背景'],
     [{ params: { ...DEFAULT_PARAMS, size: '1024x1024' } }, '像素尺寸'],
     [{ params: { ...DEFAULT_PARAMS, quality: 'high' as const } }, '质量'],
@@ -253,7 +256,7 @@ describe('native image validation and errors', () => {
   it('does not treat internal thought images as finished Google output', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ candidates: [{ content: { parts: [{ thought: true, inlineData: { mimeType: 'image/png', data: PNG } }] } }] }))
     const profile = makeProfile('gemini-3.1-flash-image', { baseUrl: 'https://google.example' })
-    await expect(callNativeImageApi(makeOptions(profile), profile)).rejects.toThrow('没有返回图片')
+    await expect(callNativeImageApi(makeOptions(profile), profile)).rejects.toThrow('未返回图片')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

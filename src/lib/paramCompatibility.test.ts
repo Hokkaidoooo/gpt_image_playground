@@ -1,9 +1,23 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
 import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_SETTINGS, normalizeSettings } from './apiProfiles'
-import { getOutputImageLimitForSettings, normalizeParamsForSettings } from './paramCompatibility'
+import { getOutputImageLimitForSettings, getTaskParamSupport, normalizeParamsForSettings } from './paramCompatibility'
 
 describe('parameter compatibility', () => {
+  it.each([
+    ['gemini-nano-banana-2.1', true],
+    ['gemini-3-pro-image', false],
+    ['gemini-2.5-flash-image', false],
+  ])('captures supported Google controls for %s', (model, thinking) => {
+    const profile = createDefaultOpenAIProfile({ provider: 'google', model })
+    expect(getTaskParamSupport(DEFAULT_SETTINGS, profile)).toEqual({ thinking, complexity: false })
+  })
+
+  it.each(['gpt-image-2.5', 'gpt-image-2.6'])('uses the Responses image tool model for complexity: %s', (imageGenerationModel) => {
+    const profile = createDefaultOpenAIProfile({ apiMode: 'responses', model: 'example-text-model', imageGenerationModel })
+    expect(getTaskParamSupport(DEFAULT_SETTINGS, profile)).toEqual({ thinking: false, complexity: imageGenerationModel === 'gpt-image-2.6' })
+  })
+
   it('limits OpenAI output count to 10', () => {
     const openAIProfile = createDefaultOpenAIProfile({ apiKey: 'test-key', streamImages: false })
     const settings = normalizeSettings({
@@ -97,7 +111,7 @@ describe('parameter compatibility', () => {
   })
 
   it.each(['gpt-image-2.5-sunburst', 'gpt-image-2.5-flare'] as const)('keeps 2.5 quality levels for %s', (model) => {
-    const profile = createDefaultOpenAIProfile({ model })
+    const profile = createDefaultOpenAIProfile({ model, imageApiDialect: 'auto' })
     const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile] })
 
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'xhigh' }, settings).quality).toBe('xhigh')
@@ -134,27 +148,27 @@ describe('parameter compatibility', () => {
 
   it.each([
     ['grok-imagine-image', 10],
-    ['gemini-3.1-flash-image', 1],
-    ['gemini-nano-banana-2.1', 1],
+    ['gemini-3.1-flash-image', 10],
+    ['gemini-nano-banana-2.1', 10],
     ['imagen-4.0-generate-001', 4],
   ])('uses the native output limit of %s', (model, limit) => {
-    const profile = createDefaultOpenAIProfile({ model })
+    const profile = createDefaultOpenAIProfile({ model, imageApiDialect: 'auto' })
     const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id })
     expect(getOutputImageLimitForSettings(settings)).toBe(limit)
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, n: 12 }, settings).n).toBe(limit)
   })
 
   it('makes a native protocol change remove the visible GPT parameter selections', () => {
-    const profile = createDefaultOpenAIProfile({ model: 'gemini-nano-banana-2.1', codexCli: true })
+    const profile = createDefaultOpenAIProfile({ model: 'gemini-nano-banana-2.1', imageApiDialect: 'auto', codexCli: true })
     const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id })
     const params = { ...DEFAULT_PARAMS, size: '3072x3072', quality: 'high' as const, moderation: 'low' as const, output_format: 'jpeg' as const, output_compression: 70, transparent_output: true, n: 4 }
-    expect(normalizeParamsForSettings(params, settings)).toEqual(DEFAULT_PARAMS)
+    expect(normalizeParamsForSettings(params, settings)).toMatchObject({ ...DEFAULT_PARAMS, aspect_ratio: 'auto', resolution: '1K', transparent_output: true, n: 4 })
     expect(params.size).toBe('3072x3072')
   })
 
-  it('keeps OpenAI options for a Gemini model explicitly wrapped as Images', () => {
+  it('uses unified model parameters for a Gemini model wrapped as Images', () => {
     const profile = createDefaultOpenAIProfile({ model: 'gemini-nano-banana-2.1', imageApiDialect: 'openai' })
     const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id })
-    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '1024x1536', quality: 'high', n: 3 }, settings)).toMatchObject({ size: '1024x1536', quality: 'high', n: 3 })
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '1024x1536', quality: 'high', n: 3 }, settings)).toMatchObject({ size: 'auto', quality: 'auto', aspect_ratio: 'auto', resolution: '1K', n: 3 })
   })
 })

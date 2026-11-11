@@ -9,7 +9,6 @@ from ctypes import wintypes
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from http import client as http_client
-from io import BytesIO
 import json
 from pathlib import Path
 import re
@@ -18,7 +17,7 @@ from typing import Callable
 from urllib import error, parse, request
 from uuid import uuid4
 
-from PIL import Image, UnidentifiedImageError
+from image_validation import ImageValidationError, image_extension
 
 from image_errors import ROOT, atomic_write, redact
 
@@ -32,7 +31,6 @@ HTTP_SUCCESS_MIN = 200
 HTTP_SUCCESS_MAX = 300
 QUALITY_OPTIONS = ("low", "medium", "high", "xhigh", "max")
 SIZE_OPTIONS = ("1024x1024", "1536x1024", "1024x1536", "1536x864", "864x1536")
-IMAGE_EXTENSIONS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}
 
 
 class ImageToolError(Exception):
@@ -307,23 +305,17 @@ def _image_bytes(item: dict, timeout: int, progress: Callable[[str], None]) -> b
         raise ImageToolError(f"已收到下载地址，但图片下载失败：{exc}。没有重新发起生图请求。") from exc
 
 
-def _image_extension(data: bytes) -> str:
+def _image_extension(data: bytes, *, enforce_safe_svg: bool = True) -> str:
     try:
-        with Image.open(BytesIO(data)) as image:
-            extension = IMAGE_EXTENSIONS.get(image.format)
-            if extension is None:
-                raise ImageToolError("返回内容不是 PNG、JPEG 或 WebP 图片。")
-            image.verify()
-        with Image.open(BytesIO(data)) as image:
-            image.load()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
-        raise ImageToolError("返回的图片损坏或不完整，未保存为成功图片。") from exc
-    return extension
+        return image_extension(data, enforce_safe_svg=enforce_safe_svg)
+    except ImageValidationError as exc:
+        raise ImageToolError(str(exc)) from exc
 
 
 def save_image_response(
     result: dict, payload: dict, settings: Settings, progress: Callable[[str], None],
     *, operation: str = "generations", save_files: bool = True, endpoint: str | None = None,
+    enforce_safe_svg: bool = True,
     output_dir: Path = DEFAULT_OUTPUT,
 ) -> tuple[GenerationResult | None, dict]:
     items = result.get("data")
@@ -334,7 +326,7 @@ def save_image_response(
         if not isinstance(item, dict):
             raise ImageToolError("图片 data 中存在无效记录。")
         content = _image_bytes(item, settings.timeout_seconds, progress)
-        images.append((content, _image_extension(content)))
+        images.append((content, _image_extension(content, enforce_safe_svg=enforce_safe_svg)))
     # 网页与窗口共用同一份已校验图片，浏览器无需再次访问远端图片链接。
     response = {
         **result,

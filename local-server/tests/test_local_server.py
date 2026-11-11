@@ -162,6 +162,44 @@ class LocalServerTests(unittest.TestCase):
         self.assertEqual(http(self.server, "/data/" + saved.name)[0], 404)
         self.assertEqual(http(self.server, "/../data/" + saved.name)[0], 404)
 
+    def test_gif_and_svg_http_save_preserves_animation_and_vector_bytes(self):
+        stream = BytesIO()
+        frames = [Image.new("RGB", (6, 4), color) for color in ("red", "blue")]
+        frames[0].save(stream, format="GIF", save_all=True, append_images=frames[1:], duration=[80, 160], loop=0)
+        gif = stream.getvalue()
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 4"><rect width="6" height="4" fill="red"/></svg>'
+        images = ["data:image/" + kind + ";base64," + base64.b64encode(data).decode() for kind, data in (("gif", gif), ("svg+xml", svg))]
+        payload = {"images": images, "endpoint": "https://supplier.example.test/v1", "request": {"prompt": "format test", "model": "test-image", "n": 2}}
+        status, _, raw = http(self.server, "/local/save-images", method="POST", body=json.dumps(payload).encode(), headers=self.auth_headers())
+        self.assertEqual(status, 200)
+        response = json.loads(raw)
+        self.assertEqual([item["output_format"] for item in response["images"]], ["gif", "svg"])
+        self.assertEqual([base64.b64decode(item["b64_json"]) for item in response["images"]], [gif, svg])
+        files = [self.output / item["fileName"] for item in response["images"]]
+        self.assertEqual([path.read_bytes() for path in files], [gif, svg])
+        with Image.open(files[0]) as animation:
+            self.assertEqual(animation.n_frames, 2)
+            self.assertEqual(animation.info["loop"], 0)
+            animation.seek(1)
+            self.assertEqual(animation.info["duration"], 160)
+        self.assertEqual(http(self.server, "/data/" + files[1].name)[0], 404)
+
+    def test_svg_active_content_is_rejected_without_saving(self):
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>test</script></svg>'
+        payload = {"images": ["data:image/svg+xml;base64," + base64.b64encode(svg).decode()], "endpoint": "https://supplier.example.test/v1", "request": {"prompt": "format test", "model": "test-image"}}
+        status, _, raw = http(self.server, "/local/save-images", method="POST", body=json.dumps(payload).encode(), headers=self.auth_headers())
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(raw)["error"]["code"], "invalid_image")
+        self.assertEqual(list(self.output.glob("image_*")), [])
+
+    def test_svg_filter_config_is_explicit_and_boolean(self):
+        config = self.temp / "svg-config.json"
+        config.write_text('{"enforce_safe_svg": false}', encoding="utf-8")
+        self.assertFalse(gui.load_gui_settings(config).enforce_safe_svg)
+        config.write_text('{"enforce_safe_svg": "false"}', encoding="utf-8")
+        with self.assertRaisesRegex(client.ImageToolError, "enforce_safe_svg"):
+            gui.load_gui_settings(config)
+
     def test_damaged_image_rejected_without_saving(self):
         payload = {"images": ["data:image/png;base64," + base64.b64encode(b"not a png").decode()], "endpoint": "https://supplier.example.test/v1", "request": {"prompt": "public test", "model": "test-image"}}
         status, _, raw = http(self.server, "/local/save-images", method="POST", body=json.dumps(payload).encode(), headers=self.auth_headers())

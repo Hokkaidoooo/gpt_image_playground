@@ -117,7 +117,7 @@ export function localImageRecord(task: TaskRecord, profile?: ApiProfile) {
     size: task.params.size,
     quality: task.params.quality,
     n: task.params.n,
-    ...(task.imageAspectRatio ? { aspect_ratio: task.imageAspectRatio } : {}),
-    ...(task.imageResolution ? { resolution: task.imageResolution } : {}),
+    ...(task.params.aspect_ratio ? { aspect_ratio: task.params.aspect_ratio } : {}),
+    ...(task.params.resolution ? { resolution: task.params.resolution } : {}),
   }
 }

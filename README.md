@@ -1,12 +1,13 @@
 # GPT Image Playground · 本地兼容增强版
 
-基于 [CookSleep/gpt_image_playground](https://github.com/CookSleep/gpt_image_playground) 的二次开发，面向 Windows 本地部署和多供应商图片 API。保留原项目作者与 MIT 许可；本分支的上游基础版本为 **v0.8.1**。
+基于 [CookSleep/gpt_image_playground](https://github.com/CookSleep/gpt_image_playground) 的二次开发，面向 Windows 本地部署和多供应商图片 API。保留原项目作者与 MIT 许可；本分支的上游基础版本为 **v0.9.0**。
 
 ## 本分支的改进
 
 | 使用场景 | 提供的能力 |
 | --- | --- |
 | 切换不同供应商 | 独立地址、密钥和模型配置；模型发现；显式选择 OpenAI Images、xAI、Gemini 等协议 |
+| 新模型与输出格式 | Google、xAI 原生与 OpenAI 兼容接口；GPT Image 2.6 参数、GIF 动画和 SVG 矢量图 |
 | 参数支持不一致 | 自动、标准、自定义兼容规则；按供应商使用默认参数；设置与请求组装共用规则 |
 | 多张生成容易超时 | 顺序分批、逐批独立超时；每张完成即保存；失败后停止后续请求 |
 | 部分图片已完成 | 保留结果，只补齐缺失图片；关联补齐任务，阻止重复提交 |
@@ -25,8 +26,7 @@ cd gpt_image_playground
 npm ci
 $env:VITE_DEFAULT_API_URL='__LOCAL_IMAGE_PRESET__'
 npm run build
-python -m pip install -r .\local-server
-equirements.txt
+python -m pip install -r .\local-server\requirements.txt
 .\local-server\start.ps1
 ```
 

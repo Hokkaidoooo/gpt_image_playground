@@ -53,7 +53,7 @@ SAVE_REQUEST_FIELDS = frozenset({
 })
 SENSITIVE_NAME = re.compile(r"(?:authorization|auth|api[_-]?key|key|token|secret|signature)", re.I)
 HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-DATA_URL = re.compile(r"data:image/(png|jpeg|webp);base64,([A-Za-z0-9+/]*={0,2})", re.I)
+DATA_URL = re.compile(r"data:image/(png|jpeg|webp|gif|svg\+xml);base64,([A-Za-z0-9+/]*={0,2})", re.I)
 
 
 class LocalRequestError(Exception):
@@ -69,6 +69,7 @@ class GuiSettings:
     save_generated_images: bool = True
     max_upload_mb: int = 512
     serialize_image_requests: bool = True
+    enforce_safe_svg: bool = True
     enforce_private_data_directory: bool = True
 
 
@@ -84,7 +85,7 @@ def load_gui_settings(path: Path | None = None, *, port: int | None = None) -> G
         raise ImageToolError("本机网页端口必须是 1024 至 65535 之间的整数。")
     if type(config.max_upload_mb) is not int or not 1 <= config.max_upload_mb <= 512:
         raise ImageToolError("max_upload_mb 必须是 1 至 512 之间的整数。")
-    for name in ("enforce_local_origin", "save_generated_images", "serialize_image_requests", "enforce_private_data_directory"):
+    for name in ("enforce_local_origin", "save_generated_images", "serialize_image_requests", "enforce_safe_svg", "enforce_private_data_directory"):
         if type(getattr(config, name)) is not bool:
             raise ImageToolError(f"gui_settings.json 的 {name} 必须是 true 或 false。")
     return config
@@ -541,7 +542,7 @@ class ImageGuiHandler(SimpleHTTPRequestHandler):
         for data_url in images:
             match = DATA_URL.fullmatch(data_url) if isinstance(data_url, str) else None
             if not match or not match[2]:
-                raise LocalRequestError("保存内容必须是 PNG、JPEG 或 WebP 的完整 Base64 图片 data URL。")
+                raise LocalRequestError("保存内容必须是 PNG、JPEG、WebP、GIF 或 SVG 的完整 Base64 图片 data URL。")
             items.append({"b64_json": match[2]})
         record_request = {**request_metadata, **({"task_id": task_id} if task_id is not None else {})}
         settings = Settings(endpoint, request_metadata["model"], "", "", DEFAULT_REQUEST_TIMEOUT, False, False)
@@ -549,6 +550,7 @@ class ImageGuiHandler(SimpleHTTPRequestHandler):
             saved, result = save_image_response(
                 {"data": items}, record_request, settings, lambda _: None,
                 save_files=self.server.config.save_generated_images, endpoint=endpoint,
+                enforce_safe_svg=self.server.config.enforce_safe_svg,
                 output_dir=self.server.output_dir,
             )
         except ImageSaveError as exc:

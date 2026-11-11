@@ -20,43 +20,6 @@ const SUPPORT_LABELS = {
 }
 const INPUT_CLASS = 'w-full rounded-xl border border-transparent bg-black/[0.04] px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:bg-white/[0.06] dark:text-gray-200 dark:focus:border-blue-500/50'
 
-export function ImageParameterControls({ profile, onPatch, disabled = false, compactClassName }: {
-  profile: ApiProfile
-  onPatch: (patch: Partial<ApiProfile>) => void
-  disabled?: boolean
-  compactClassName?: string
-}) {
-  const capabilities = getImageProviderCapabilities(profile)
-  const controls = [
-    { field: 'imageAspectRatio' as const, label: compactClassName ? '比例' : '画面比例', defaultLabel: '自动', values: capabilities.aspectRatios },
-    { field: 'imageResolution' as const, label: '分辨率', defaultLabel: '默认', values: capabilities.resolutions },
-  ]
-
-  return (
-    <div className={compactClassName ? 'contents' : 'grid grid-cols-2 gap-3'}>
-      {controls.map((control) => {
-        const value = profile[control.field] ?? ''
-        const options = [{ label: control.defaultLabel, value: '' }, ...control.values.map((value) => ({ label: value, value }))]
-        if (value && !control.values.includes(value)) options.push({ label: `${value}（此模型不支持）`, value })
-        return (
-          <div key={control.field} className={compactClassName ? 'relative max-sm:flex-auto sm:shrink-0' : undefined}>
-            {!compactClassName && <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">{control.label}</span>}
-            <Select
-              value={value}
-              onChange={(value) => onPatch({ [control.field]: String(value) })}
-              options={options}
-              disabled={disabled}
-              prefix={compactClassName ? <span className="mr-1.5 text-gray-400 dark:text-gray-500">{control.label}</span> : undefined}
-              menuClassName="min-w-max"
-              className={compactClassName ?? INPUT_CLASS}
-            />
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 export default function ImageModelsPanel({ profile, onPatch, disabled = false }: {
   profile: ApiProfile
   onPatch: (patch: Partial<ApiProfile>) => void
@@ -108,7 +71,7 @@ export default function ImageModelsPanel({ profile, onPatch, disabled = false }:
   const patchProfile = (patch: Partial<ApiProfile>) => {
     const next = { ...profile, ...patch }
     onPatch(getImageProviderCapabilities(next).nativeParameters
-      ? { ...patch, codexCli: false, streamImages: false, responseFormatB64Json: false, transparentBackgroundMethod: 'api' }
+      ? { ...patch, codexCli: false, streamImages: false, responseFormatB64Json: false, transparentBackgroundMethod: 'local' }
       : patch)
   }
 
@@ -133,21 +96,20 @@ export default function ImageModelsPanel({ profile, onPatch, disabled = false }:
       <div>
         <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">图片接口</span>
         <Select
-          value={profile.imageApiDialect ?? 'auto'}
+          value={profile.imageApiDialect ?? capabilities.dialect}
           onChange={(value) => patchProfile({ imageApiDialect: value as ImageApiDialect })}
           options={IMAGE_API_OPTIONS}
           disabled={disabled}
           className={INPUT_CLASS}
         />
         <p className="mt-1.5 text-xs leading-relaxed text-gray-500">
-          {(profile.imageApiDialect ?? 'auto') === 'auto' && <>当前自动选择：{dialectLabel}。 </>}
+          {profile.imageApiDialect === 'auto' && <>当前自动选择：{dialectLabel}。 </>}
           中转站使用统一图片接口时，请选择 OpenAI Images；其他接口按供应商说明选择。
         </p>
       </div>
       {capabilities.nativeParameters && (
         <div className="space-y-2">
-          <ImageParameterControls profile={profile} onPatch={onPatch} disabled={disabled} />
-          <p className="text-xs leading-relaxed text-gray-500">此接口使用画面比例和分辨率。切换后会恢复不适用的图片参数，并关闭透明背景、流式传输和 Codex CLI 选项。</p>
+          <p className="text-xs leading-relaxed text-gray-500">画面比例和分辨率在首页参数栏设置。此接口不使用 Codex CLI 参数。</p>
         </div>
       )}
       <div className="rounded-xl border border-gray-200/70 p-3 dark:border-white/[0.08]">

@@ -47,6 +47,27 @@ describe('供应商兼容设置', () => {
     } })
   })
 
+  it.each([
+    ['gemini-3-pro-image', ['画面比例', 'Base64 返回格式'], false],
+    ['grok-imagine-image-2.0', ['画质', 'Base64 返回格式'], false],
+    ['grok-imagine-1.5-apimart', ['画面比例', 'Base64 返回格式'], true],
+    ['grok-imagine-1.5-ext', ['画面比例', 'Base64 返回格式'], true],
+  ] as const)('%s只显示实际JSON参数及适用的参考图设置', async (model, labels, urlOnly) => {
+    const profile = createDefaultOpenAIProfile({ model, imageApiDialect: 'openai', imageRequestCompatibility: { mode: 'custom', omitParameters: ['moderation'] } })
+    await act(async () => root.render(<ImageCompatibilityPanel profile={profile} onPatch={vi.fn()} />))
+    expect([...container.querySelectorAll('fieldset label')].map((label) => label.textContent?.trim())).toEqual(labels)
+    expect(container.textContent).not.toContain('参考图上传方式')
+    expect(container.textContent).not.toContain('image[]')
+    expect(container.textContent).not.toContain('审核强度使用供应商默认值')
+    if (urlOnly) {
+      expect(container.textContent).toContain('本机自动优化和图片大小设置不适用')
+      expect(container.textContent).not.toContain('参考图处理')
+      expect(container.textContent).not.toContain('参考图大小上限')
+    } else {
+      expect(container.textContent).toContain('参考图处理')
+    }
+  })
+
   it('锁定配置的自定义参数不能修改', async () => {
     const onPatch = vi.fn()
     const profile = createDefaultOpenAIProfile({ imageRequestCompatibility: { mode: 'custom' } })

@@ -3,17 +3,18 @@ import { base64ToBytes } from './dataUrl'
 import {
   assertImageInputPayloadSize,
   createRequestTimeoutError,
-  fetchImageUrlAsDataUrl,
   getApiErrorMessage,
-  isDataUrl,
-  isHttpUrl,
   normalizeBase64Image,
+  runSequentialImageRequests,
   type CallApiOptions,
   type CallApiResult,
 } from './imageApiShared'
 import { getImageProviderCapabilities, type ImageProviderCapabilities } from './imageProvider'
 import { buildImageProviderUrl, createImageProviderHeaders, redactImageProviderError, type ResolvedImageApiDialect } from './imageProviderUrl'
 import { apiFetch } from './platform'
+import { callGoogleImageApi } from './googleImageApi'
+import { callModelImagesApi } from './openaiCompatibleImageApi'
+import { supportsGrokQuality } from './imageModels'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -30,10 +31,10 @@ function parseInlineImage(dataUrl: string): { mimeType: string; data: string } {
 function assertNativeOptions(opts: CallApiOptions, profile: ApiProfile, caps: ImageProviderCapabilities) {
   if (!caps.nativeParameters) throw new Error('当前配置未选择原生生图协议')
   if (!opts.prompt.trim()) throw new Error('请输入生图提示词')
-  if (opts.maskDataUrl) throw new Error('当前原生生图协议不支持蒙版编辑，请移除蒙版后提交')
+  if (opts.maskDataUrl) throw new Error('当前原生生图协议不支持遮罩编辑，请移除遮罩后提交')
   if (opts.nativeTransparentBackground || opts.params.transparent_output) throw new Error('当前原生生图协议不支持透明背景输出，请关闭透明背景后提交')
   if (opts.params.size !== DEFAULT_PARAMS.size) throw new Error('当前原生生图协议不支持 GPT 像素尺寸，请改用宽高比和分辨率')
-  if (opts.params.quality !== DEFAULT_PARAMS.quality) throw new Error('当前原生生图协议不支持 GPT 质量参数，请将质量设为自动')
+  if (opts.params.quality !== DEFAULT_PARAMS.quality && !(caps.dialect === 'xai' && supportsGrokQuality(profile.model) && ['low', 'medium'].includes(opts.params.quality))) throw new Error('当前原生生图协议不支持 GPT 质量参数，请将质量设为自动')
   if (opts.params.moderation !== DEFAULT_PARAMS.moderation) throw new Error('当前原生生图协议不支持 GPT 审核参数，请将审核设为自动')
   if (opts.params.output_compression !== DEFAULT_PARAMS.output_compression) throw new Error('当前原生生图协议不支持 GPT 压缩参数，请清除压缩设置')
   if (opts.params.output_format !== DEFAULT_PARAMS.output_format) throw new Error('当前原生生图协议的图片格式由模型决定，请清除 GPT 输出格式选择')
@@ -43,8 +44,8 @@ function assertNativeOptions(opts: CallApiOptions, profile: ApiProfile, caps: Im
     throw new Error(`当前原生生图协议的输出数量必须是 1–${caps.maxOutputImages} 的整数`)
   }
   if (opts.inputImageDataUrls.length > caps.maxInputImages) throw new Error(`当前原生生图协议最多支持 ${caps.maxInputImages} 张参考图`)
-  const ratio = profile.imageAspectRatio?.trim()
-  const resolution = profile.imageResolution?.trim()
+  const ratio = opts.params.aspect_ratio?.trim()
+  const resolution = opts.params.resolution?.trim()
   if (ratio && ratio !== 'auto' && !caps.aspectRatios.includes(ratio)) throw new Error(`当前原生生图协议不支持宽高比 ${ratio}`)
   if (resolution && resolution !== 'auto' && !caps.resolutions.includes(resolution)) throw new Error(`当前模型不支持分辨率 ${resolution}，可选：${caps.resolutions.join('、')}`)
   assertImageInputPayloadSize(opts.inputImageDataUrls.reduce((total, value) => total + value.length, 0))
@@ -52,18 +53,8 @@ function assertNativeOptions(opts: CallApiOptions, profile: ApiProfile, caps: Im
 }
 
 function createNativeRequest(opts: CallApiOptions, profile: ApiProfile, dialect: ResolvedImageApiDialect): { path: string; body: Record<string, unknown> } {
-  const aspectRatio = profile.imageAspectRatio && profile.imageAspectRatio !== 'auto' ? profile.imageAspectRatio : undefined
-  const resolution = profile.imageResolution && profile.imageResolution !== 'auto' ? profile.imageResolution : undefined
-  if (dialect === 'xai') {
-    if (opts.inputImageDataUrls.length === 1 && aspectRatio) throw new Error('xAI 单张参考图编辑会沿用输入图比例，请将宽高比设为自动')
-    const body: Record<string, unknown> = { model: profile.model, prompt: opts.prompt, n: opts.params.n, response_format: 'b64_json' }
-    if (aspectRatio) body.aspect_ratio = aspectRatio
-    if (resolution) body.resolution = resolution.toLowerCase()
-    if (opts.inputImageDataUrls.length === 1) body.image = { url: opts.inputImageDataUrls[0] }
-    if (opts.inputImageDataUrls.length > 1) body.images = opts.inputImageDataUrls.map((url) => ({ url }))
-    return { path: opts.inputImageDataUrls.length ? 'images/edits' : 'images/generations', body }
-  }
-
+  const aspectRatio = opts.params.aspect_ratio && opts.params.aspect_ratio !== 'auto' ? opts.params.aspect_ratio : undefined
+  const resolution = opts.params.resolution && opts.params.resolution !== 'auto' ? opts.params.resolution : undefined
   const model = profile.model.replace(/^models\//, '')
   if (!model || /[\s,:?#]/.test(model)) throw new Error('原生 Google 生图需要一个有效的模型 ID')
   if (dialect === 'gemini-interactions') {
@@ -87,18 +78,7 @@ function createNativeRequest(opts: CallApiOptions, profile: ApiProfile, dialect:
     return { path: `models/${encodeURIComponent(model)}:predict`, body: { instances: [{ prompt: opts.prompt }], parameters } }
   }
 
-  const imageConfig: Record<string, unknown> = {}
-  if (aspectRatio) imageConfig.aspectRatio = aspectRatio
-  if (resolution) imageConfig.imageSize = resolution
-  const generationConfig: Record<string, unknown> = { responseModalities: ['TEXT', 'IMAGE'] }
-  if (Object.keys(imageConfig).length) generationConfig.imageConfig = imageConfig
-  return {
-    path: `models/${encodeURIComponent(model)}:generateContent`,
-    body: {
-      contents: [{ role: 'user', parts: [{ text: opts.prompt }, ...opts.inputImageDataUrls.map((url) => ({ inlineData: parseInlineImage(url) }))] }],
-      generationConfig,
-    },
-  }
+  throw new Error('未配置原生生图协议')
 }
 
 function getMime(value: unknown, defaultMime?: string): string {
@@ -142,56 +122,7 @@ function collectGoogleImages(payload: Record<string, unknown>, dialect: Resolved
     return images
   }
 
-  const feedback = isRecord(payload.promptFeedback) ? payload.promptFeedback : isRecord(payload.prompt_feedback) ? payload.prompt_feedback : {}
-  const blockReason = feedback.blockReason ?? feedback.block_reason
-  if (blockReason && blockReason !== 'BLOCK_REASON_UNSPECIFIED') throw new Error(`Google 生图请求被阻止：${String(blockReason)}`)
-  if (!Array.isArray(payload.candidates)) throw new Error('Google 生图接口没有返回 candidates[] 图片结果')
-  const images: string[] = []
-  const texts: string[] = []
-  for (const candidate of payload.candidates) {
-    if (!isRecord(candidate)) throw new Error('Google 生图接口返回的候选结果格式无效')
-    const reason = candidate.finishReason ?? candidate.finish_reason
-    if (typeof reason === 'string' && reason !== 'STOP' && reason !== 'FINISH_REASON_UNSPECIFIED') throw new Error(`Google 生图未正常完成：${reason}`)
-    const content = isRecord(candidate.content) ? candidate.content : {}
-    if (!Array.isArray(content.parts)) throw new Error('Google 生图候选结果缺少 content.parts[]')
-    for (const part of content.parts) {
-      if (!isRecord(part)) throw new Error('Google 生图接口返回的内容条目格式无效')
-      const inline = isRecord(part.inlineData) ? part.inlineData : isRecord(part.inline_data) ? part.inline_data : undefined
-      // thought 图片不是最终交付图片，不能让仅含思考过程的响应成为成功任务。
-      if (inline && part.thought !== true) images.push(getInlineResult(inline.data, inline.mimeType ?? inline.mime_type))
-      if (typeof part.text === 'string' && part.thought !== true) texts.push(part.text)
-    }
-  }
-  if (!images.length) throw new Error(`Google 生图没有返回图片${texts.length ? `：${texts.join('\n')}` : ''}`)
-  return images
-}
-
-async function collectXaiImages(payload: Record<string, unknown>, signal: AbortSignal, timeoutSeconds: number): Promise<{ images: string[]; rawImageUrls: string[]; revisedPrompts: Array<string | undefined> }> {
-  if (!Array.isArray(payload.data)) throw new Error('xAI 生图接口没有返回 data[] 图片结果')
-  const images: string[] = []
-  const rawImageUrls = payload.data.filter(isRecord).map((item) => item.url).filter(isHttpUrl)
-  const revisedPrompts: Array<string | undefined> = []
-  try {
-    for (const item of payload.data) {
-      if (!isRecord(item)) throw new Error('xAI 生图接口返回的图片条目格式无效')
-      if (item.respect_moderation === false) throw new Error('xAI 生成的图片被审核过滤')
-      const mime = getMime(item.mime_type ?? item.mimeType, 'image/jpeg')
-      if (typeof item.b64_json === 'string' && item.b64_json.trim()) {
-        images.push(getInlineResult(item.b64_json, mime))
-      } else if (isHttpUrl(item.url) || isDataUrl(item.url)) {
-        const image = await fetchImageUrlAsDataUrl(item.url, mime, signal, timeoutSeconds)
-        parseInlineImage(image)
-        images.push(image)
-      } else {
-        throw new Error('xAI 生图接口返回的图片条目缺少 b64_json 或图片 URL')
-      }
-      revisedPrompts.push(typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined)
-    }
-  } catch (err) {
-    if (rawImageUrls.length && err instanceof Error) Object.assign(err, { rawImageUrls })
-    throw err
-  }
-  return { images, rawImageUrls, revisedPrompts }
+  throw new Error('未配置Google结果解析协议')
 }
 
 function resultParams(images: string[]): { actualParams: Partial<TaskParams>; actualParamsList: Array<Partial<TaskParams>> } {
@@ -206,25 +137,36 @@ function resultParams(images: string[]): { actualParams: Partial<TaskParams>; ac
 export async function callNativeImageApi(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
   const caps = getImageProviderCapabilities(profile)
   assertNativeOptions(opts, profile, caps)
+  if (caps.dialect === 'gemini') return callGoogleImageApi(opts, profile)
+  if (caps.dialect === 'xai') {
+    try {
+      return await runSequentialImageRequests(opts, caps.maxOutputImages, (batch) => callModelImagesApi(batch, { ...profile, provider: 'xai' }))
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+      const message = redactImageProviderError(error.message, profile.apiKey)
+      if (message !== error.message) throw Object.assign(new Error(message), { name: error.name, ...('rawImageUrls' in error ? { rawImageUrls: error.rawImageUrls } : {}) })
+      throw error
+    }
+  }
+  return runSequentialImageRequests(opts, caps.dialect === 'gemini-interactions' ? 1 : caps.maxOutputImages, (batch) => callNativeImageApiSingle(batch, profile, caps))
+}
+
+async function callNativeImageApiSingle(opts: CallApiOptions, profile: ApiProfile, caps: ImageProviderCapabilities): Promise<CallApiResult> {
   const request = createNativeRequest(opts, profile, caps.dialect)
   const headers = { ...createImageProviderHeaders(profile, caps.dialect), 'Content-Type': 'application/json' }
   const url = buildImageProviderUrl(profile, request.path, caps.dialect)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(createRequestTimeoutError(profile.timeout)), profile.timeout * 1000)
   try {
+    if (opts.shouldContinue && !opts.shouldContinue()) throw new Error('任务已停止，本次请求未发送。')
     const response = await apiFetch(url, { method: 'POST', headers, body: JSON.stringify(request.body), cache: 'no-store', signal: controller.signal, timeoutSeconds: profile.timeout })
     if (!response.ok) throw new Error(`生图失败：${await getApiErrorMessage(response)}`)
     const payload: unknown = await response.json()
     if (!isRecord(payload)) throw new Error('原生生图接口返回的 JSON 格式无效')
     if (payload.error) throw new Error(`生图失败：${typeof payload.error === 'string' ? payload.error : JSON.stringify(payload.error)}`)
-    if (caps.dialect !== 'xai') {
-      const images = collectGoogleImages(payload, caps.dialect)
-      if (!images.length) throw new Error('原生生图接口没有返回图片')
-      return { images, ...resultParams(images) }
-    }
-    const result = await collectXaiImages(payload, controller.signal, profile.timeout)
-    if (!result.images.length) throw new Error('xAI 生图接口没有返回图片')
-    return { ...result, ...resultParams(result.images) }
+    const images = collectGoogleImages(payload, caps.dialect)
+    if (!images.length) throw new Error('原生生图接口没有返回图片')
+    return { images, ...resultParams(images) }
   } catch (err) {
     if (err instanceof Error) {
       const message = redactImageProviderError(err.message, profile.apiKey)

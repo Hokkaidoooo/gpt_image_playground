@@ -43,6 +43,7 @@ python -B local-server\gui_server.py --serve --open --output-dir 'D:\Images'
 |---|---:|---|
 | `port` | 17865 | 本机端口；命令行端口优先 |
 | `save_generated_images` | true | 完整校验图片后自动保存；false 时仍保留浏览器中的图片 |
+| `enforce_safe_svg` | true | SVG 仅允许静态元素与文档内资源；false 关闭静态内容筛选，XML 完整性和 DTD/实体/处理指令禁用始终生效 |
 | `serialize_image_requests` | true | 同一时间只转发一个供应商请求；并发提交会明确提示等待 |
 | `max_upload_mb` | 512 | 单次上传大小上限 |
 | `enforce_local_origin` | true | 校验本机网页来源；false 关闭来源校验，会话凭据仍必需 |
@@ -75,3 +76,10 @@ python -B -m unittest discover -s local-server\tests -v
 ## 开源归属
 
 本项目基于 CookSleep 的 GPT Image Playground 二次开发。本附件沿用仓库的 MIT 许可证；原作者的版权声明保留在 `LICENSE` 中。
+
+
+## GIF 与 SVG
+
+保存 PNG、JPEG、WebP、GIF 和 SVG。GIF 逐帧解码校验后原样保存，保留动画帧、时长和循环设置。SVG 保留原始 UTF-8 字节，可在图库下载和本机输出目录读取。
+
+默认 `enforce_safe_svg: true`：允许静态图形、文字、渐变、滤镜、样式及 `#id` 文档内引用；拒绝脚本、事件属性、外部资源、嵌入资源、foreignObject、动态元素及不能明确校验的 CSS 语法。内容不符合规则时明确返回错误，不会删除或改写 SVG 内容。设置 `enforce_safe_svg: false` 并重启服务可关闭静态内容筛选；DTD、实体声明和处理指令始终拒绝，防止 XML 解析访问外部资源。

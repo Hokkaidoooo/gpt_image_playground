@@ -1,5 +1,6 @@
-import type { AppSettings, ResponsesOutputItem, TaskParams } from '../types'
+import { OUTPUT_FORMATS, type ApiProfile, type AppSettings, type ImageSearchGrounding, type ResponsesOutputItem, type TaskParams, type TaskRecord } from '../types'
 import { blobToDataUrl } from './dataUrl'
+import { DEFAULT_SVG_MODEL } from './imageModels'
 import { apiFetch, isTauri } from './platform'
 import { hasLocalImageBridge } from './localRuntime'
 
@@ -7,6 +8,20 @@ export const MIME_MAP: Record<string, string> = {
   png: 'image/png',
   jpeg: 'image/jpeg',
   webp: 'image/webp',
+  svg: 'image/svg+xml',
+  gif: 'image/gif',
+}
+
+/** GPT Image 2.6 的 complexity、SVG 和 GIF 字段；Images API 生成请求和 Responses 图像工具格式相同 */
+export function applyGptImage26Params(target: Record<string, unknown>, params: TaskParams, profile: ApiProfile) {
+  if (params.complexity !== 'auto') target.complexity = params.complexity
+  if (params.output_format === 'svg') {
+    target.svg = { model: profile.svgModel?.trim() || DEFAULT_SVG_MODEL }
+  }
+  if (params.output_format === 'gif') {
+    target.frame_count = params.frame_count
+    target.frame_duration_ms = params.frame_duration_ms
+  }
 }
 
 export const MAX_MASK_EDIT_FILE_BYTES = 50 * 1024 * 1024
@@ -23,12 +38,15 @@ export interface CallApiOptions {
   /** 与 inputImageDataUrls 按索引对齐的原链接，不是通过链接添加的为 null */
   inputImageUrls?: (string | null)[]
   maskDataUrl?: string
+  /** 第一张输入图上的透明标注层，仅 Images API 编辑接口原生支持 */
+  markupDataUrl?: string
   skipCodexCliSizePrompt?: boolean
   shouldContinue?: () => boolean
   onInputImagesPrepared?: (adjustments: string[]) => void | Promise<void>
   onRequestCompleted?: (result: CallApiResult, requestIndex: number) => Promise<void>
+  onPromptHintsPrepared?: (hints: TaskRecord['promptHints']) => void | Promise<void>
   onFalRequestEnqueued?: (request: { requestId: string; endpoint: string }) => void
-  onCustomTaskEnqueued?: (task: { taskId: string }) => void
+  onCustomTaskEnqueued?: (task: { taskId: string }) => void | Promise<void>
   onPartialImage?: (partial: { image: string; partialImageIndex?: number; requestIndex?: number }) => void
 }
 
@@ -36,6 +54,7 @@ export interface CallApiResult {
   /** 已取得图片，但结果数量或保存过程需要用户处理。 */
   completionError?: string
   inputImageAdjustments?: string[]
+  searchGrounding?: ImageSearchGrounding[]
   /** base64 data URL 列表 */
   images: string[]
   /** API 返回的实际生效参数 */
@@ -59,7 +78,9 @@ export function isDataUrl(value: unknown): value is string {
 }
 
 export function normalizeBase64Image(value: string, fallbackMime: string): string {
-  return value.startsWith('data:') ? value : `data:${fallbackMime};base64,${value}`
+  if (value.startsWith('data:')) return value
+  const mime = value.startsWith('/9j/') ? 'image/jpeg' : value.startsWith('iVBORw0KGgo') ? 'image/png' : value.startsWith('UklGR') ? 'image/webp' : fallbackMime
+  return `data:${mime};base64,${value}`
 }
 
 export function getResponsesImageResultBase64(result: ResponsesOutputItem['result']): string | undefined {
@@ -210,6 +231,26 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
   return blobToDataUrl(blob, fallbackMime)
 }
 
+const MODERATION_STAGE_LABELS: Record<string, string> = {
+  input: '提示词或参考图',
+  output: '生成结果',
+}
+
+/** moderation_blocked 错误可能附带拦截阶段和粗粒度类别 */
+export function appendModerationDetails(message: string, details: unknown): string {
+  if (!details || typeof details !== 'object') return message
+  const record = details as Record<string, unknown>
+  const stage = typeof record.moderation_stage === 'string' ? MODERATION_STAGE_LABELS[record.moderation_stage] : undefined
+  const categories = Array.isArray(record.categories)
+    ? record.categories.filter((item): item is string => typeof item === 'string' && Boolean(item))
+    : []
+  const parts = [
+    stage ? `拦截来源：${stage}` : '',
+    categories.length ? `类别：${categories.join('、')}` : '',
+  ].filter(Boolean)
+  return parts.length ? `${message}\n${parts.join('；')}` : message
+}
+
 export async function getApiErrorMessage(response: Response): Promise<string> {
   let text: string
   try {
@@ -230,7 +271,7 @@ export async function getApiErrorMessage(response: Response): Promise<string> {
   const details = Array.isArray(record.detail)
     ? record.detail.map((item) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
     : undefined
-  const message = typeof detail === 'string' ? detail : details || text.trim()
+  const message = appendModerationDetails(typeof detail === 'string' ? detail : details || text.trim(), error.moderation_details)
   const readable = /<(?:!doctype|html|head|body)\b/i.test(message)
     ? message.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 600)
     : message
@@ -262,8 +303,8 @@ export function pickActualParams(source: unknown): Partial<TaskParams> {
   if (record.quality === 'auto' || record.quality === 'low' || record.quality === 'medium' || record.quality === 'high' || record.quality === 'xhigh' || record.quality === 'max') {
     actualParams.quality = record.quality
   }
-  if (record.output_format === 'png' || record.output_format === 'jpeg' || record.output_format === 'webp') {
-    actualParams.output_format = record.output_format
+  if (OUTPUT_FORMATS.includes(record.output_format as TaskParams['output_format'])) {
+    actualParams.output_format = record.output_format as TaskParams['output_format']
   }
   if (typeof record.output_compression === 'number') actualParams.output_compression = record.output_compression
   if (record.moderation === 'auto' || record.moderation === 'low') actualParams.moderation = record.moderation
@@ -275,4 +316,112 @@ export function pickActualParams(source: unknown): Partial<TaskParams> {
 export function mergeActualParams(...sources: Array<Partial<TaskParams> | undefined>): Partial<TaskParams> | undefined {
   const merged = Object.assign({}, ...sources.filter((source) => source && Object.keys(source).length))
   return Object.keys(merged).length ? merged : undefined
+}
+
+export function mergeImageApiResults(results: PromiseSettledResult<CallApiResult>[], counts = results.map(() => 1)): CallApiResult {
+  const successfulResults = results
+    .filter((result): result is PromiseFulfilledResult<CallApiResult> => result.status === 'fulfilled')
+    .map((result) => result.value)
+  if (!successfulResults.length) {
+    const firstError = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')!
+    throw firstError.reason
+  }
+
+  const images = successfulResults.flatMap((result) => result.images)
+  const actualParamsList = successfulResults.flatMap((result) =>
+    result.actualParamsList?.length ? result.actualParamsList : result.images.map(() => result.actualParams),
+  )
+  const revisedPrompts = successfulResults.flatMap((result) =>
+    result.revisedPrompts?.length ? result.revisedPrompts : result.images.map(() => undefined),
+  )
+  const rawImageUrls = successfulResults.flatMap((result) => result.rawImageUrls ?? [])
+  const searchGrounding = successfulResults.flatMap((result) => result.searchGrounding ?? [])
+  let offset = 0
+  const failedRequests = results.flatMap((result, index) => {
+    const start = offset
+    offset += counts[index]
+    return result.status === 'rejected'
+      ? Array.from({ length: counts[index] }, (_, slot) => ({ requestIndex: start + slot, error: result.reason instanceof Error ? result.reason.message : String(result.reason) }))
+      : (result.value.failedRequests ?? []).map((failure) => ({ ...failure, requestIndex: start + failure.requestIndex }))
+  })
+  const completionError = successfulResults.map((result) => result.completionError).filter(Boolean).join('\n')
+  const inputImageAdjustments = [...new Set(successfulResults.flatMap((result) => result.inputImageAdjustments ?? []))]
+
+  return {
+    images,
+    actualParams: mergeActualParams(successfulResults[0].actualParams ?? {}, { n: images.length }),
+    actualParamsList,
+    revisedPrompts,
+    ...(rawImageUrls.length ? { rawImageUrls } : {}),
+    ...(searchGrounding.length ? { searchGrounding } : {}),
+    ...(failedRequests.length ? { failedRequests } : {}),
+    ...(completionError ? { completionError } : {}),
+    ...(inputImageAdjustments.length ? { inputImageAdjustments } : {}),
+  }
+}
+
+export function isRecoverableImageTaskError(error: unknown): error is Error & { recoverableImageTask: true } {
+  return error instanceof Error && 'recoverableImageTask' in error && error.recoverableImageTask === true
+}
+
+export async function runSequentialImageRequests<T extends CallApiOptions>(opts: T, batchSize: number, execute: (batch: T) => Promise<CallApiResult>): Promise<CallApiResult> {
+  if (!Number.isSafeInteger(opts.params.n) || opts.params.n < 1 || !Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error('生成张数与每批张数必须是正整数。')
+  const results: PromiseSettledResult<CallApiResult>[] = []
+  const counts: number[] = []
+  const total = opts.params.n
+  for (let requestIndex = 0; requestIndex < total; requestIndex += batchSize) {
+    const count = Math.min(batchSize, total - requestIndex)
+    if (opts.shouldContinue && !opts.shouldContinue()) {
+      results.push({ status: 'rejected', reason: new Error('任务已停止，剩余图片未发送。') })
+      counts.push(total - requestIndex)
+      break
+    }
+    let result: CallApiResult
+    try {
+      result = await execute({
+        ...opts,
+        params: { ...opts.params, n: count },
+        onPartialImage: opts.onPartialImage
+          ? (partial) => opts.onPartialImage?.({ ...partial, requestIndex })
+          : undefined,
+      })
+    } catch (error) {
+      if (isRecoverableImageTaskError(error)) throw error
+      results.push({ status: 'rejected', reason: error })
+      counts.push(count)
+      if (requestIndex + count < total) {
+        results.push({ status: 'rejected', reason: new Error('前一批请求失败，后续图片未发送。') })
+        counts.push(total - requestIndex - count)
+      }
+      break
+    }
+    if (result.images.length < count) {
+      result = {
+        ...result,
+        failedRequests: Array.from({ length: count - result.images.length }, (_, index) => ({
+          requestIndex: result.images.length + index,
+          error: `供应商只返回 ${result.images.length} 张图片，本批请求 ${count} 张；缺少的图片未自动补发。`,
+        })),
+      }
+    } else if (result.images.length > count) {
+      result = { ...result, completionError: `供应商返回 ${result.images.length} 张图片，超过本批请求的 ${count} 张；已保留全部结果并停止后续请求。` }
+    }
+    try {
+      await opts.onRequestCompleted?.(result, requestIndex)
+    } catch (error) {
+      result = { ...result, completionError: `图片已生成，但结果保存未完成：${error instanceof Error ? error.message : String(error)}` }
+    }
+    results.push({ status: 'fulfilled', value: result })
+    const occupiedSlots = Math.max(count, result.images.length)
+    counts.push(occupiedSlots)
+    if (result.failedRequests?.length || result.completionError) {
+      if (requestIndex + occupiedSlots < total) {
+        results.push({ status: 'rejected', reason: new Error('前一批结果未完整确认，后续图片未发送。') })
+        counts.push(total - requestIndex - occupiedSlots)
+      }
+      break
+    }
+  }
+  if (results.length === 1 && results[0].status === 'fulfilled') return results[0].value
+  return mergeImageApiResults(results, counts)
 }
