@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import deque
 from dataclasses import dataclass
 import gzip
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +12,7 @@ import ipaddress
 import json
 import math
 import os
+import select
 import sys
 import webbrowser
 from pathlib import Path
@@ -42,6 +44,7 @@ BRIDGE_USER_AGENT = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 STREAM_CHUNK_BYTES = 65536
+GENERATION_QUEUE_POLL_SECONDS = 0.1
 HOP_BY_HOP_HEADERS = frozenset({
     "host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "transfer-encoding", "upgrade", "content-length",
@@ -60,6 +63,16 @@ class LocalRequestError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
+
+
+def client_connection_is_open(connection: socket.socket) -> bool:
+    try:
+        readable, _, exceptional = select.select([connection], [], [connection], 0)
+        if exceptional:
+            return False
+        return not readable or bool(connection.recv(1, socket.MSG_PEEK))
+    except (OSError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -166,8 +179,36 @@ class ImageGuiServer(ThreadingHTTPServer):
         self.error_log_path = self.output_dir.joinpath("最近错误.log")
         self.token = secrets.token_urlsafe(32)
         self.generation_lock = threading.Lock()
+        self.generation_queue_condition = threading.Condition()
+        self.generation_waiters = deque()
         super().__init__(("127.0.0.1", config.port), ImageGuiHandler)
         self.origin = f"http://127.0.0.1:{self.server_port}"
+
+    def acquire_generation_slot(self, connection: socket.socket) -> bool:
+        ticket = object()
+        with self.generation_queue_condition:
+            self.generation_waiters.append(ticket)
+        while True:
+            if not client_connection_is_open(connection):
+                with self.generation_queue_condition:
+                    self.generation_waiters.remove(ticket)
+                    self.generation_queue_condition.notify_all()
+                return False
+            with self.generation_queue_condition:
+                if self.generation_waiters[0] is ticket and self.generation_lock.acquire(blocking=False):
+                    self.generation_waiters.popleft()
+                    self.generation_queue_condition.notify_all()
+                    if not client_connection_is_open(connection):
+                        self.generation_lock.release()
+                        self.generation_queue_condition.notify_all()
+                        return False
+                    return True
+                self.generation_queue_condition.wait(GENERATION_QUEUE_POLL_SECONDS)
+
+    def release_generation_slot(self) -> None:
+        self.generation_lock.release()
+        with self.generation_queue_condition:
+            self.generation_queue_condition.notify_all()
 
 
 class ImageGuiHandler(SimpleHTTPRequestHandler):
@@ -475,9 +516,9 @@ class ImageGuiHandler(SimpleHTTPRequestHandler):
         acquired = False
         try:
             if self.server.config.serialize_image_requests:
-                acquired = self.server.generation_lock.acquire(blocking=False)
+                acquired = self.server.acquire_generation_slot(self.connection)
                 if not acquired:
-                    raise LocalRequestError("已有供应商请求正在处理，请等待结果后再提交；本次未发送。", 409)
+                    return
             headers = self._forward_headers(metadata, body, credentials)
             with open_http_response(
                 metadata["url"], metadata["method"], headers, body,
@@ -505,7 +546,7 @@ class ImageGuiHandler(SimpleHTTPRequestHandler):
                 self._write(status, content, content_type, content_encoding=encoding)
         finally:
             if acquired:
-                self.server.generation_lock.release()
+                self.server.release_generation_slot()
 
     def _save_images(self) -> None:
         try:

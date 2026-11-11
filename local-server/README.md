@@ -44,7 +44,7 @@ python -B local-server\gui_server.py --serve --open --output-dir 'D:\Images'
 | `port` | 17865 | 本机端口；命令行端口优先 |
 | `save_generated_images` | true | 完整校验图片后自动保存；false 时仍保留浏览器中的图片 |
 | `enforce_safe_svg` | true | SVG 仅允许静态元素与文档内资源；false 关闭静态内容筛选，XML 完整性和 DTD/实体/处理指令禁用始终生效 |
-| `serialize_image_requests` | true | 同一时间只转发一个供应商请求；并发提交会明确提示等待 |
+| `serialize_image_requests` | true | 同一时间只转发一个供应商请求；并发请求按顺序等待，取消的等待请求不会转发 |
 | `max_upload_mb` | 512 | 单次上传大小上限 |
 | `enforce_local_origin` | true | 校验本机网页来源；false 关闭来源校验，会话凭据仍必需 |
 | `enforce_private_data_directory` | true | 禁止数据目录和网页目录重叠，避免数据作为网页资源被读取；false 关闭目录校验 |

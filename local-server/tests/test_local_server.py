@@ -67,6 +67,9 @@ class UpstreamHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.server.requests.append((self.path, dict(self.headers), body))
+        if self.path == "/hold":
+            self.server.entered.set()
+            self.server.release.wait(timeout=5)
         if self.path == "/failure":
             response = json.dumps({"error": {"message": "invalid: " + TEST_KEY}}).encode()
             status = 400
@@ -147,6 +150,62 @@ class LocalServerTests(unittest.TestCase):
             self.assertEqual(upstream.requests[0][1]["Authorization"], f"Bearer {TEST_KEY}")
             self.assertEqual(upstream.requests[0][1]["User-Agent"], gui.BRIDGE_USER_AGENT)
             self.assertNotIn(TEST_KEY, self.server.error_log_path.read_text(encoding="utf-8"))
+
+    def test_concurrent_proxy_requests_wait_in_order_until_current_request_finishes(self):
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+        upstream.requests = []
+        upstream.entered = threading.Event()
+        upstream.release = threading.Event()
+        original = gui.open_http_response
+        results = []
+        failures = []
+
+        def local_only(url, *args, **kwargs):
+            if parse.urlsplit(url).hostname != "127.0.0.1":
+                raise AssertionError("测试禁止外部供应商请求")
+            return original(url, *args, **kwargs)
+
+        def proxy_request(prompt):
+            metadata = {
+                "url": f"http://127.0.0.1:{upstream.server_port}/hold",
+                "method": "POST",
+                "headers": [["Authorization", f"Bearer {TEST_KEY}"], ["Content-Type", "application/json"]],
+                "timeoutSeconds": 5,
+            }
+            headers = {**self.auth_headers(), "X-Local-Request": parse.quote(json.dumps(metadata), safe="")}
+            try:
+                body = json.dumps({"prompt": prompt}).encode("utf-8")
+                results.append(http(self.server, "/local/proxy", method="POST", body=body, headers=headers)[0])
+            except Exception as exc:
+                failures.append(exc)
+
+        with running(upstream), patch.object(gui, "open_http_response", side_effect=local_only):
+            first = threading.Thread(target=proxy_request, args=("first",))
+            second = threading.Thread(target=proxy_request, args=("second",))
+            first.start()
+            try:
+                self.assertTrue(upstream.entered.wait(timeout=3))
+                second.start()
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    with self.server.generation_queue_condition:
+                        if len(self.server.generation_waiters) == 1:
+                            break
+                    time.sleep(0.01)
+                with self.server.generation_queue_condition:
+                    self.assertEqual(len(self.server.generation_waiters), 1)
+                self.assertEqual(len(upstream.requests), 1)
+            finally:
+                upstream.release.set()
+                first.join(timeout=5)
+                second.join(timeout=5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(sorted(results), [200, 200])
+        self.assertEqual(len(upstream.requests), 2)
+        self.assertEqual([item[2] for item in upstream.requests], [b'{"prompt": "first"}', b'{"prompt": "second"}'])
+        self.assertFalse(self.server.generation_lock.locked())
 
     def test_verified_image_saved_only_to_output_directory(self):
         encoded = base64.b64encode(png_bytes()).decode()
