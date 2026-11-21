@@ -6,7 +6,19 @@ The `local-image-gui` branch of this fork extends [CookSleep’s GPT Image Playg
 
 ## Start on Windows
 
-1. Use Windows 10 or 11, Node.js 22.13 or later in the 22.x series, and Python 3.10+. Run the [PowerShell setup block](README.md#windows-本地启动) in order. It clones the `local-image-gui` branch, builds the web app with the local preset, installs the bridge dependency, and starts the service.
+Use Windows 10 or 11, Node.js 22.13 or later in the 22.x series, and Python 3.10+. Run these commands in PowerShell:
+
+```powershell
+git clone --branch local-image-gui https://github.com/Hokkaidoooo/gpt_image_playground.git
+cd gpt_image_playground
+npm ci
+$env:VITE_DEFAULT_API_URL='__LOCAL_IMAGE_PRESET__'
+npm run build
+python -m pip install -r .\local-server\requirements.txt
+.\local-server\start.ps1
+```
+
+1. Wait for the local service to start.
 2. Open `http://127.0.0.1:17865` if the browser does not open automatically. In **Settings → API configuration** (`设置 → API 配置`), enter your provider URL, API key, and model. Use the image API compatibility settings when the provider accepts only certain parameters.
 3. Enter a prompt and generate. The gallery shows the result; the bridge also saves validated images to `local-server\data` by default. Press `Ctrl+C` to stop it.
 

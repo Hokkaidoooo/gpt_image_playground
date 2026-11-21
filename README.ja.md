@@ -6,7 +6,19 @@
 
 ## Windows で起動する
 
-1. Windows 10 または 11、Node.js 22.13 以降の 22.x、Python 3.10 以降を用意します。[PowerShell のコマンド欄](README.md#windows-本地启动)を上から実行すると、`local-image-gui` の取得、ローカル設定でのビルド、中継サービスの依存パッケージの導入と起動ができます。
+Windows 10 または 11、Node.js 22.13 以降の 22.x、Python 3.10 以降を用意し、PowerShell で次のコマンドを順に実行します。
+
+```powershell
+git clone --branch local-image-gui https://github.com/Hokkaidoooo/gpt_image_playground.git
+cd gpt_image_playground
+npm ci
+$env:VITE_DEFAULT_API_URL='__LOCAL_IMAGE_PRESET__'
+npm run build
+python -m pip install -r .\local-server\requirements.txt
+.\local-server\start.ps1
+```
+
+1. ローカルサービスが起動するまで待ちます。
 2. ブラウザーが自動で開かない場合は `http://127.0.0.1:17865` を開きます。**設定 → API 設定**（画面表示は `设置 → API 配置`）で、接続先 URL、API キー、モデルを入力します。接続先が一部の項目にしか対応しない場合は、画像 API の互換性設定を調整します。
 3. プロンプトを入力して画像を生成し、ギャラリーで確認します。既定では、検証済みの画像は `local-server\data` にも保存されます。終了するには `Ctrl+C` を押します。
 

@@ -6,7 +6,19 @@ La rama `local-image-gui` de este fork añade un puente para Windows y perfiles 
 
 ## Inicio en Windows
 
-1. Usa Windows 10 u 11, Node.js 22.13 o posterior de la serie 22, y Python 3.10 o posterior. Ejecuta en orden el [bloque de PowerShell](README.md#windows-本地启动). Clona `local-image-gui`, compila la aplicación con el perfil local, instala la dependencia del puente e inicia el servicio.
+Usa Windows 10 u 11, Node.js 22.13 o posterior de la serie 22, y Python 3.10 o posterior. Ejecuta estos comandos en PowerShell:
+
+```powershell
+git clone --branch local-image-gui https://github.com/Hokkaidoooo/gpt_image_playground.git
+cd gpt_image_playground
+npm ci
+$env:VITE_DEFAULT_API_URL='__LOCAL_IMAGE_PRESET__'
+npm run build
+python -m pip install -r .\local-server\requirements.txt
+.\local-server\start.ps1
+```
+
+1. Espera a que se inicie el servicio local.
 2. Abre `http://127.0.0.1:17865` si el navegador no se abre solo. En **Ajustes → Configuración de API** (`设置 → API 配置`), introduce la URL, la clave y el modelo del proveedor. Ajusta la compatibilidad de la API de imágenes si el proveedor solo admite ciertos parámetros.
 3. Escribe una instrucción y genera una imagen. Puedes verla en la galería; por defecto, el puente guarda las imágenes validadas en `local-server\data`. Pulsa `Ctrl+C` para detenerlo.
 
