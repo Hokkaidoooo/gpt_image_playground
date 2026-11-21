@@ -1,5 +1,7 @@
 # GPT Image Playground · 本地兼容增强版
 
+[简体中文](README.md) · [English](README.en.md) · [Español](README.es.md) · [日本語](README.ja.md)
+
 基于 [CookSleep/gpt_image_playground](https://github.com/CookSleep/gpt_image_playground) 的二次开发，面向 Windows 本地部署和多供应商图片 API。保留原项目作者与 MIT 许可；本分支的上游基础版本为 **v0.9.0**。
 
 ## 本分支的改进
@@ -18,7 +20,7 @@
 
 ## Windows 本地启动
 
-需要 Node.js 20.19+、Python 3.10+，以及所选供应商的 API Key。
+建议使用 Node.js 22.13+（22.x）、Python 3.10+，以及所选供应商的 API Key。
 
 ```powershell
 git clone --branch local-image-gui https://github.com/Hokkaidoooo/gpt_image_playground.git
@@ -30,13 +32,13 @@ python -m pip install -r .\local-server\requirements.txt
 .\local-server\start.ps1
 ```
 
-具体启动参数、数据目录和配置见 [本机服务说明](local-server/README.md)。在页面中添加供应商后，输入提示词即可生成；兼容规则位于「设置 → API 配置 → 图片接口兼容性」。
+打开 `http://127.0.0.1:17865`，在「设置 → API 配置」中填写所选供应商的地址、密钥和模型，再输入提示词生成。兼容规则位于同一设置页的「图片接口兼容性」。按 `Ctrl+C` 停止服务；启动参数、数据目录和配置见 [本机服务说明](local-server/README.md)。
 
 ## 图片与密钥
 
 - 原始参考图保留；超限时处理上传副本，调整记录显示在任务详情中。
 - 自动兼容对第三方 Images 接口采用14 MB上传上限，给常见15 MB限制留出余量。可自定义上限或切换保留原图模式。
-- 密钥由用户在本机填写，浏览器配置按原项目机制保存在本地；公开仓库不包含供应商密钥、个人图片、提示词和运行记录。
+- 密钥保存在当前浏览器的本机站点存储中，请勿分享含密钥的配置导出。生成或编辑时，提示词和参考图会按操作发送给所选供应商；实际费用和数据处理规则由供应商决定。
 - 524等远端网关超时需要供应商处理。失败不会自动重新发送付费生成请求；已返回任务ID的异步接口按其契约恢复查询。
 
 ## 开发与验证
